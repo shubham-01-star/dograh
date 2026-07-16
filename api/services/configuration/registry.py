@@ -72,6 +72,7 @@ class ServiceProviders(str, Enum):
     GLADIA = "gladia"
     RIME = "rime"
     MINIMAX = "minimax"
+    RUMIK = "rumik"
     GOOGLE_VERTEX = "google_vertex"
     OPENAI_REALTIME = "openai_realtime"
     GROK_REALTIME = "grok_realtime"
@@ -243,6 +244,11 @@ CARTESIA_PROVIDER_MODEL_CONFIG = provider_model_config("Cartesia")
 SARVAM_PROVIDER_MODEL_CONFIG = provider_model_config("Sarvam")
 CAMB_PROVIDER_MODEL_CONFIG = provider_model_config("Camb.ai")
 RIME_PROVIDER_MODEL_CONFIG = provider_model_config("Rime")
+RUMIK_PROVIDER_MODEL_CONFIG = provider_model_config(
+    "Rumik",
+    description="Rumik.ai ultra-low-latency instruct-TTS and tone-steered TTS.",
+    provider_docs_url="https://playground.rumik.ai/docs",
+)
 GOOGLE_CLOUD_PROVIDER_MODEL_CONFIG = provider_model_config("Google Cloud")
 SPEECHMATICS_PROVIDER_MODEL_CONFIG = provider_model_config("Speechmatics")
 ASSEMBLYAI_PROVIDER_MODEL_CONFIG = provider_model_config("AssemblyAI")
@@ -1120,6 +1126,65 @@ class AzureSpeechTTSConfiguration(BaseTTSConfiguration):
     )
 
 
+RUMIK_TTS_MODELS = ["muga", "mulberry"]
+
+
+@register_tts
+class RumikTTSConfiguration(BaseTTSConfiguration):
+    model_config = RUMIK_PROVIDER_MODEL_CONFIG
+    provider: Literal[ServiceProviders.RUMIK] = ServiceProviders.RUMIK
+    model: str = Field(
+        default="muga",
+        description="Rumik TTS model.",
+        json_schema_extra={"examples": RUMIK_TTS_MODELS},
+    )
+    voice: str = Field(
+        default="[neutral]",
+        description="Rumik voice ID/tone tag (e.g. '[neutral]', '[happy]', '[sad]', '[excited]', '[angry]', '[whisper]', 'speaker_1', 'speaker_2', 'speaker_3', 'speaker_4').",
+    )
+    description: str | None = Field(
+        default=None,
+        description="Natural-language description to steer the voice (mulberry model only). Omit when using preset speaker.",
+    )
+    speaker: str | None = Field(
+        default=None,
+        description="Preset voice speaker_1..speaker_4 (mulberry model only).",
+    )
+    f0_up_key: int = Field(
+        default=0,
+        ge=-12,
+        le=12,
+        description="Pitch shift in semitones (mulberry with speaker voice).",
+    )
+    temperature: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=2.0,
+        description="Sampling temperature.",
+    )
+    top_p: float = Field(
+        default=0.95,
+        ge=0.0,
+        le=1.0,
+        description="Nucleus sampling threshold.",
+    )
+    top_k: int = Field(
+        default=50,
+        ge=1,
+        description="Top-k sampling threshold.",
+    )
+    repetition_penalty: float = Field(
+        default=1.2,
+        ge=0.0,
+        description="Repetition penalty.",
+    )
+    max_new_tokens: int = Field(
+        default=2048,
+        ge=1,
+        description="Output length cap.",
+    )
+
+
 TTSConfig = Annotated[
     Union[
         DeepgramTTSConfiguration,
@@ -1134,6 +1199,7 @@ TTSConfig = Annotated[
         SpeachesTTSConfiguration,
         MiniMaxTTSConfiguration,
         AzureSpeechTTSConfiguration,
+        RumikTTSConfiguration,
     ],
     Field(discriminator="provider"),
 ]

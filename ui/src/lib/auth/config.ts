@@ -13,10 +13,14 @@ export async function getAuthProvider(): Promise<string> {
     return cachedAuthProvider;
   }
 
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 2000);
+
   try {
     const backendUrl = getServerBackendUrl();
     const res = await fetch(`${backendUrl}/api/v1/health`, {
-      next: { revalidate: 300 },
+      signal: controller.signal,
+      cache: 'no-store',
     });
     if (res.ok) {
       const data = await res.json();
@@ -25,6 +29,8 @@ export async function getAuthProvider(): Promise<string> {
     }
   } catch {
     // Backend not reachable — fall back to local
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   cachedAuthProvider = "local";

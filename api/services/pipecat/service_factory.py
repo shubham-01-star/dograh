@@ -560,6 +560,28 @@ def create_tts_service(
             skip_aggregator_types=["recording_router", "recording"],
             silence_time_s=1.0,
         )
+    elif user_config.tts.provider == ServiceProviders.RUMIK.value:
+        from api.services.pipecat.rumik_tts import RumikTTSService, RumikTTSSettings
+
+        settings = RumikTTSSettings(
+            model=user_config.tts.model,
+            voice=user_config.tts.voice,
+            description=getattr(user_config.tts, "description", None),
+            speaker=getattr(user_config.tts, "speaker", None),
+            f0_up_key=getattr(user_config.tts, "f0_up_key", 0),
+            temperature=getattr(user_config.tts, "temperature", 0.6),
+            top_p=getattr(user_config.tts, "top_p", 0.95),
+            top_k=getattr(user_config.tts, "top_k", 50),
+            repetition_penalty=getattr(user_config.tts, "repetition_penalty", 1.2),
+            max_new_tokens=getattr(user_config.tts, "max_new_tokens", 2048),
+        )
+        return RumikTTSService(
+            api_key=user_config.tts.api_key,
+            settings=settings,
+            text_filters=[xml_function_tag_filter],
+            skip_aggregator_types=["recording_router", "recording"],
+            silence_time_s=1.0,
+        )
     else:
         raise HTTPException(
             status_code=400, detail=f"Invalid TTS provider {user_config.tts.provider}"

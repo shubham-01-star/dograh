@@ -26,6 +26,9 @@ $RunDir     = Join-Path $BaseDir 'run'
 $LogsRoot   = Join-Path $BaseDir 'logs'
 $LatestDir  = Join-Path $LogsRoot 'latest'
 $VenvPath   = Join-Path $BaseDir 'venv'
+if (-not (Test-Path $VenvPath)) {
+    $VenvPath = Join-Path $BaseDir '.venv'
+}
 
 Write-Host "Starting Dograh Services (DEV MODE) in BASE_DIR: $BaseDir"
 Write-Host "Auto-reload enabled for api/ directory changes"
@@ -65,7 +68,7 @@ if ($IncludeTelephonyWorkers) {
 }
 
 $serviceSpecs += @{ Name = 'uvicorn'; Cmd = "uvicorn api.app:app --host 0.0.0.0 --port $($env:UVICORN_BASE_PORT) --reload --reload-dir api" }
-$serviceSpecs += @{ Name = 'arq';     Cmd = "python -m arq api.tasks.arq.WorkerSettings --custom-log-dict api.tasks.arq.LOG_CONFIG" }
+$serviceSpecs += @{ Name = 'arq';     Cmd = "python scripts/run_arq.py api.tasks.arq.WorkerSettings --custom-log-dict api.tasks.arq.LOG_CONFIG" }
 
 ###############################################################################
 ### 3) Activate virtual environment
@@ -143,7 +146,7 @@ Write-Host "Waiting for uvicorn health check at $healthUrl ..."
 $healthy = $false
 for ($attempt = 1; $attempt -le $HealthMaxAttempts; $attempt++) {
     try {
-        $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
+        $resp = Invoke-WebRequest -Uri $healthUrl -UseBasicParsing -TimeoutSec 10 -ErrorAction Stop
         if ($resp.StatusCode -eq 200) {
             Write-Host "OK uvicorn healthy (attempt $attempt)"
             $healthy = $true

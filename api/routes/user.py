@@ -355,7 +355,7 @@ async def reactivate_api_key(
 
 
 # Voice Configuration Endpoints
-TTSProvider = Literal["elevenlabs", "deepgram", "sarvam", "cartesia", "dograh", "rime"]
+TTSProvider = Literal["elevenlabs", "deepgram", "sarvam", "cartesia", "dograh", "rime", "rumik"]
 
 
 class VoiceInfo(BaseModel):
@@ -381,6 +381,24 @@ async def get_voices(
     user: UserModel = Depends(get_user),
 ) -> VoicesResponse:
     """Get available voices for a TTS provider."""
+    if provider == "rumik":
+        voices = [
+            # muga tones
+            VoiceInfo(voice_id="[neutral]", name="Muga - Neutral Tone", gender="Unspecified", description="Prefixes text with [neutral] for muga model"),
+            VoiceInfo(voice_id="[happy]", name="Muga - Happy Tone", gender="Unspecified", description="Prefixes text with [happy] for muga model"),
+            VoiceInfo(voice_id="[sad]", name="Muga - Sad Tone", gender="Unspecified", description="Prefixes text with [sad] for muga model"),
+            VoiceInfo(voice_id="[excited]", name="Muga - Excited Tone", gender="Unspecified", description="Prefixes text with [excited] for muga model"),
+            VoiceInfo(voice_id="[angry]", name="Muga - Angry Tone", gender="Unspecified", description="Prefixes text with [angry] for muga model"),
+            VoiceInfo(voice_id="[whisper]", name="Muga - Whisper Tone", gender="Unspecified", description="Prefixes text with [whisper] for muga model"),
+            # mulberry speakers
+            VoiceInfo(voice_id="speaker_1", name="Mulberry - Speaker 1", gender="Female", description="Studio voice 1 for mulberry model"),
+            VoiceInfo(voice_id="speaker_2", name="Mulberry - Speaker 2", gender="Male", description="Studio voice 2 for mulberry model"),
+            VoiceInfo(voice_id="speaker_3", name="Mulberry - Speaker 3", gender="Female", description="Studio voice 3 for mulberry model"),
+            VoiceInfo(voice_id="speaker_4", name="Mulberry - Speaker 4", gender="Male", description="Studio voice 4 for mulberry model"),
+            VoiceInfo(voice_id="custom", name="Mulberry - Custom Voice", gender="Unspecified", description="Uses the natural-language description field to steer"),
+        ]
+        return VoicesResponse(provider="rumik", voices=voices)
+
     try:
         result = await mps_service_key_client.get_voices(
             provider=provider,

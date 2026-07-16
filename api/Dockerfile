@@ -39,8 +39,7 @@ RUN --mount=type=bind,source=pipecat,target=/tmp/pipecat,rw \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install '/tmp/pipecat[cartesia,deepgram,openai,elevenlabs,groq,google,azure,sarvam,soundfile,silero,webrtc,speechmatics,openrouter,camb,mcp]' \
  && uv pip uninstall opencv-python \
- && uv pip install opencv-python-headless \
- && python -c "import nltk; nltk.download('punkt_tab', download_dir='/opt/venv/nltk_data', quiet=True)"
+ && uv pip install opencv-python-headless
 
 # Strip cache files, test/example dirs, and type stubs from the venv
 RUN find /opt/venv -type f -name '*.pyc' -delete && \
@@ -144,6 +143,7 @@ ENV PYTHONUNBUFFERED=1
 # Copy application code (chown at copy-time avoids a duplicate /app layer
 # from a later `RUN chown -R`, which would double the on-disk size of /app).
 COPY --chown=dograh:dograh ./api ./api
+COPY --chown=dograh:dograh ./api/nltk_data /app/nltk_data
 COPY --chown=dograh:dograh ./scripts/start_services_docker.sh ./scripts/start_services_docker.sh
 
 # ts_validator Node deps (built in ts-deps stage with full node:22-slim image).

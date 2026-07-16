@@ -53,7 +53,7 @@ SERVICE_COMMANDS=(
   "python -m api.services.telephony.ari_manager"
   "python -m api.services.campaign.campaign_orchestrator"
   "uvicorn api.app:app --host 0.0.0.0 --port $UVICORN_BASE_PORT --reload --reload-dir api"
-  "python -m arq api.tasks.arq.WorkerSettings --custom-log-dict api.tasks.arq.LOG_CONFIG"
+  "python scripts/run_arq.py api.tasks.arq.WorkerSettings --custom-log-dict api.tasks.arq.LOG_CONFIG"
 )
 
 ###############################################################################

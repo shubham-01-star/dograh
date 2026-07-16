@@ -30,7 +30,7 @@ fi
 alembic -c "$BASE_DIR/api/alembic.ini" upgrade head
 
 ###############################################################################
-### 3) Signal handling — forward TERM/INT to children for clean docker stop
+### 3) Signal handling â€” forward TERM/INT to children for clean docker stop
 ###############################################################################
 
 pids=()
@@ -49,7 +49,7 @@ trap shutdown TERM INT
 start() {
   local name=$1
   shift
-  echo "→ Starting $name"
+  echo "â†’ Starting $name"
   "$@" &
   pids+=($!)
   echo "  $name PID $!"
@@ -64,7 +64,7 @@ start campaign_orchestrator python -m api.services.campaign.campaign_orchestrato
 
 # Spawn FASTAPI_WORKERS independent uvicorn processes on consecutive ports
 # starting at UVICORN_BASE_PORT. nginx upstream (configured in setup_remote.sh)
-# balances across them with least_conn — better than uvicorn --workers for
+# balances across them with least_conn â€” better than uvicorn --workers for
 # long-lived WebSocket connections, which would otherwise stick to whichever
 # worker accepted them first.
 for ((i=0; i<FASTAPI_WORKERS; i++)); do
@@ -77,7 +77,7 @@ for ((i=1; i<=ARQ_WORKERS; i++)); do
 done
 
 ###############################################################################
-### 5) Wait — if any service exits, tear the container down so docker restarts
+### 5) Wait â€” if any service exits, tear the container down so docker restarts
 ###############################################################################
 
 wait -n
