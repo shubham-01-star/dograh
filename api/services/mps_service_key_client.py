@@ -241,19 +241,12 @@ class MPSServiceKeyClient:
                 )
                 return False
 
-    async def check_service_key_usage(
-        self,
-        service_key: str,
-        organization_id: Optional[int] = None,
-        created_by: Optional[str] = None,
-    ) -> dict:
+    async def check_service_key_usage(self, service_key: str) -> dict:
         """
         Check the usage and quota of a service key.
 
         Args:
             service_key: The service key to check usage for
-            organization_id: Organization ID (for authenticated mode)
-            created_by: User provider ID (for OSS mode)
 
         Returns:
             Dictionary containing:
@@ -317,39 +310,6 @@ class MPSServiceKeyClient:
                 )
                 raise httpx.HTTPStatusError(
                     f"Failed to get usage by created_by: {response.text}",
-                    request=response.request,
-                    response=response,
-                )
-
-    async def get_usage_by_organization(self, organization_id: int) -> dict:
-        """
-        Get aggregated usage for all service keys belonging to an organization (hosted mode).
-
-        Args:
-            organization_id: The organization's ID
-
-        Returns:
-            Dictionary containing total_credits_used and remaining_credits
-        """
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            response = await client.post(
-                f"{self.base_url}/api/v1/service-keys/usage/organization",
-                json={"organization_id": organization_id},
-                headers=self._get_headers(organization_id=organization_id),
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                return {
-                    "total_credits_used": data.get("total_credits_used", 0.0),
-                    "remaining_credits": data.get("remaining_credits", 0.0),
-                }
-            else:
-                logger.error(
-                    f"Failed to get usage by organization: {response.status_code} - {response.text}"
-                )
-                raise httpx.HTTPStatusError(
-                    f"Failed to get usage by organization: {response.text}",
                     request=response.request,
                     response=response,
                 )
@@ -422,30 +382,26 @@ class MPSServiceKeyClient:
                 response=response,
             )
 
-    async def get_billing_account_status(
-        self,
-        organization_id: int,
-        created_by: Optional[str] = None,
-    ) -> Optional[dict]:
-        """Get an existing MPS v2 billing account without creating one."""
+    async def get_billing_pricing(self, organization_id: int) -> dict:
+        """Return MPS-owned effective platform and Dograh model prices for an org."""
+        if DEPLOYMENT_MODE == "oss":
+            raise ValueError("OSS deployments do not fetch hosted billing prices")
+
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             response = await client.get(
-                f"{self.base_url}/api/v1/billing/accounts/{organization_id}/status",
-                headers=self._get_headers(
-                    organization_id=organization_id,
-                    created_by=created_by,
-                ),
+                f"{self.base_url}/api/v1/billing/accounts/{organization_id}/pricing",
+                headers=self._get_headers(organization_id=organization_id),
             )
 
             if response.status_code == 200:
                 return response.json()
 
             logger.error(
-                "Failed to get MPS billing account status: "
+                "Failed to get MPS billing pricing: "
                 f"{response.status_code} - {response.text}"
             )
             raise httpx.HTTPStatusError(
-                f"Failed to get MPS billing account status: {response.text}",
+                f"Failed to get MPS billing pricing: {response.text}",
                 request=response.request,
                 response=response,
             )
@@ -474,6 +430,50 @@ class MPSServiceKeyClient:
             )
             raise httpx.HTTPStatusError(
                 f"Failed to ensure MPS billing account v2: {response.text}",
+                request=response.request,
+                response=response,
+            )
+
+    async def authorize_workflow_run_start(
+        self,
+        *,
+        organization_id: int,
+        workflow_run_id: int | None = None,
+        service_key: Optional[str] = None,
+        require_correlation_id: bool = False,
+        minimum_credits: float | None = None,
+        metadata: Optional[dict] = None,
+        created_by: Optional[str] = None,
+    ) -> dict:
+        """Authorize a hosted workflow run and optionally mint its MPS correlation."""
+        payload = {
+            "workflow_run_id": workflow_run_id,
+            "service_key": service_key,
+            "require_correlation_id": require_correlation_id,
+            "metadata": metadata or {},
+        }
+        if minimum_credits is not None:
+            payload["minimum_credits"] = minimum_credits
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            response = await client.post(
+                f"{self.base_url}/api/v1/billing/accounts/{organization_id}/run-authorization",
+                json=payload,
+                headers=self._get_headers(
+                    organization_id=organization_id,
+                    created_by=created_by,
+                ),
+            )
+
+            if response.status_code == 200:
+                return response.json()
+
+            logger.warning(
+                "Failed to authorize MPS workflow run start: "
+                f"{response.status_code} - {response.text}"
+            )
+            raise httpx.HTTPStatusError(
+                f"Failed to authorize MPS workflow run start: {response.text}",
                 request=response.request,
                 response=response,
             )
@@ -557,16 +557,15 @@ class MPSServiceKeyClient:
                 if response.status_code == 200:
                     return response.json()
 
-                should_retry = (
-                    response.status_code == 409
-                    and "usage_not_ready" in response.text
-                    and attempt < max_attempts
+                usage_not_ready = (
+                    response.status_code == 409 and "usage_not_ready" in response.text
                 )
-                if should_retry:
+                if usage_not_ready and attempt < max_attempts:
                     await asyncio.sleep(attempt)
                     continue
 
-                logger.error(
+                log = logger.warning if usage_not_ready else logger.error
+                log(
                     "Failed to report platform usage: "
                     f"{response.status_code} - {response.text}"
                 )
@@ -677,6 +676,9 @@ class MPSServiceKeyClient:
         provider: str,
         model: Optional[str] = None,
         language: Optional[str] = None,
+        q: Optional[str] = None,
+        gender: Optional[str] = None,
+        accent: Optional[str] = None,
         organization_id: Optional[int] = None,
         created_by: Optional[str] = None,
     ) -> dict:
@@ -702,6 +704,12 @@ class MPSServiceKeyClient:
                 params["model"] = model
             if language:
                 params["language"] = language
+            if q:
+                params["q"] = q
+            if gender:
+                params["gender"] = gender
+            if accent:
+                params["accent"] = accent
             response = await client.get(
                 f"{self.base_url}/api/v1/voice-proxy/{provider}/voices",
                 headers=self._get_headers(organization_id, created_by),

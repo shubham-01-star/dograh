@@ -9,9 +9,17 @@ from api.db import db_client
 from api.db.models import (
     UserModel,
 )
+from api.schemas.onboarding_state import OnboardingState, OnboardingStateUpdate
+from api.schemas.workflow_configurations import (
+    WorkflowConfigurationDefaults,
+    get_default_workflow_configurations,
+)
 from api.services.auth.depends import get_user
 from api.services.configuration.ai_model_configuration import (
+    convert_legacy_ai_model_configuration_to_v2,
     get_resolved_ai_model_configuration,
+    update_organization_ai_model_configuration_last_validated_at,
+    upsert_organization_ai_model_configuration_v2,
 )
 from api.services.configuration.check_validity import (
     APIKeyStatusResponse,
@@ -26,6 +34,10 @@ from api.services.organization_preferences import (
     get_organization_preferences,
     upsert_organization_preferences,
 )
+from api.services.user_onboarding import (
+    get_onboarding_state,
+    update_onboarding_state,
+)
 
 router = APIRouter(prefix="/user")
 
@@ -35,13 +47,14 @@ class AuthUserResponse(TypedDict):
     is_superuser: bool
 
 
-class DefaultConfigurationsResponse(TypedDict):
+class DefaultConfigurationsResponse(BaseModel):
     llm: dict[str, dict]
     tts: dict[str, dict]
     stt: dict[str, dict]
     embeddings: dict[str, dict]
     realtime: dict[str, dict]
     default_providers: dict[str, str]
+    workflow_configurations: WorkflowConfigurationDefaults
 
 
 @router.get("/configurations/defaults")
@@ -68,8 +81,9 @@ async def get_default_configurations() -> DefaultConfigurationsResponse:
             for provider, model_cls in REGISTRY[ServiceType.REALTIME].items()
         },
         "default_providers": DEFAULT_SERVICE_PROVIDERS,
+        "workflow_configurations": get_default_workflow_configurations(),
     }
-    return configurations
+    return DefaultConfigurationsResponse(**configurations)
 
 
 @router.get("/auth/user")
@@ -94,12 +108,29 @@ class UserConfigurationRequestResponseSchema(BaseModel):
     organization_pricing: dict[str, Union[float, str, bool]] | None = None
 
 
+def _is_validation_cache_stale(
+    last_validated_at: datetime | None,
+    validity_ttl_seconds: int,
+) -> bool:
+    if last_validated_at is None:
+        return True
+
+    has_timezone = (
+        last_validated_at.tzinfo is not None
+        and last_validated_at.utcoffset() is not None
+    )
+    if has_timezone:
+        now = datetime.now(last_validated_at.tzinfo)
+    else:
+        now = datetime.now()
+    return last_validated_at < now - timedelta(seconds=validity_ttl_seconds)
+
+
 @router.get("/configurations/user")
 async def get_user_configurations(
     user: UserModel = Depends(get_user),
 ) -> UserConfigurationRequestResponseSchema:
     resolved_config = await get_resolved_ai_model_configuration(
-        user_id=user.id,
         organization_id=user.selected_organization_id,
     )
     masked_config = mask_user_config(resolved_config.effective)
@@ -128,7 +159,11 @@ async def update_user_configurations(
     request: UserConfigurationRequestResponseSchema,
     user: UserModel = Depends(get_user),
 ) -> UserConfigurationRequestResponseSchema:
-    existing_config = await db_client.get_user_configurations(user.id)
+    existing_config = (
+        await get_resolved_ai_model_configuration(
+            organization_id=user.selected_organization_id,
+        )
+    ).effective
 
     incoming_dict = request.model_dump(exclude_none=True)
 
@@ -141,6 +176,9 @@ async def update_user_configurations(
     }
 
     if incoming_dict:
+        if not user.selected_organization_id:
+            raise HTTPException(status_code=400, detail="No organization selected")
+
         # Merge via helper
         try:
             user_configurations = merge_user_configurations(
@@ -164,8 +202,16 @@ async def update_user_configurations(
         except ValueError as e:
             raise HTTPException(status_code=422, detail=e.args[0])
 
-        user_configurations = await db_client.update_user_configuration(
-            user.id, user_configurations
+        try:
+            organization_configuration = convert_legacy_ai_model_configuration_to_v2(
+                user_configurations
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+
+        await upsert_organization_ai_model_configuration_v2(
+            user.selected_organization_id,
+            organization_configuration,
         )
     else:
         user_configurations = existing_config
@@ -203,21 +249,34 @@ async def update_user_configurations(
     return masked_config
 
 
+@router.get("/onboarding-state")
+async def get_user_onboarding_state(
+    user: UserModel = Depends(get_user),
+) -> OnboardingState:
+    return await get_onboarding_state(user.id)
+
+
+@router.put("/onboarding-state")
+async def update_user_onboarding_state(
+    request: OnboardingStateUpdate,
+    user: UserModel = Depends(get_user),
+) -> OnboardingState:
+    return await update_onboarding_state(user.id, request)
+
+
 @router.get("/configurations/user/validate")
 async def validate_user_configurations(
     validity_ttl_seconds: int = Query(default=60, ge=0, le=86400),
     user: UserModel = Depends(get_user),
 ) -> APIKeyStatusResponse:
     resolved_config = await get_resolved_ai_model_configuration(
-        user_id=user.id,
         organization_id=user.selected_organization_id,
     )
     configurations = resolved_config.effective
 
-    if (
-        configurations.last_validated_at
-        and configurations.last_validated_at
-        < datetime.now() - timedelta(seconds=validity_ttl_seconds)
+    if _is_validation_cache_stale(
+        configurations.last_validated_at,
+        validity_ttl_seconds,
     ):
         validator = UserConfigurationValidator()
         try:
@@ -226,7 +285,13 @@ async def validate_user_configurations(
                 organization_id=user.selected_organization_id,
                 created_by=user.provider_id,
             )
-            await db_client.update_user_configuration_last_validated_at(user.id)
+            if (
+                resolved_config.source == "organization_v2"
+                and user.selected_organization_id is not None
+            ):
+                await update_organization_ai_model_configuration_last_validated_at(
+                    user.selected_organization_id
+                )
             return status
         except ValueError as e:
             raise HTTPException(status_code=422, detail=e.args[0])
@@ -368,9 +433,18 @@ class VoiceInfo(BaseModel):
     preview_url: Optional[str] = None
 
 
+class VoiceFacets(BaseModel):
+    """Distinct selector values across a provider's full voice catalog."""
+
+    genders: List[str] = []
+    accents: List[str] = []
+    languages: List[str] = []
+
+
 class VoicesResponse(BaseModel):
     provider: str
     voices: List[VoiceInfo]
+    facets: Optional[VoiceFacets] = None
 
 
 @router.get("/configurations/voices/{provider}")
@@ -378,6 +452,9 @@ async def get_voices(
     provider: TTSProvider,
     model: Optional[str] = None,
     language: Optional[str] = None,
+    q: Optional[str] = None,
+    gender: Optional[str] = None,
+    accent: Optional[str] = None,
     user: UserModel = Depends(get_user),
 ) -> VoicesResponse:
     """Get available voices for a TTS provider."""
@@ -404,12 +481,16 @@ async def get_voices(
             provider=provider,
             model=model,
             language=language,
+            q=q,
+            gender=gender,
+            accent=accent,
             organization_id=user.selected_organization_id,
             created_by=user.provider_id,
         )
         return VoicesResponse(
             provider=result.get("provider", provider),
             voices=[VoiceInfo(**voice) for voice in result.get("voices", [])],
+            facets=result.get("facets"),
         )
     except Exception as e:
         logger.error(f"Failed to fetch voices for {provider}: {e}")

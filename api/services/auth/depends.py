@@ -13,8 +13,25 @@ from api.schemas.ai_model_configuration import EffectiveAIModelConfiguration
 from api.services.auth.stack_auth import stackauth
 from api.services.configuration.registry import ServiceProviders
 from api.services.mps_billing import ensure_hosted_mps_billing_account_v2
-from api.services.posthog_client import capture_event
+from api.services.posthog_client import (
+    POSTHOG_ORGANIZATION_GROUP_TYPE,
+    capture_event,
+    group_identify,
+    set_person_properties,
+)
 from api.utils.auth import decode_jwt_token
+
+
+async def require_local_auth() -> None:
+    """Reject email/password auth requests outside OSS (local) deployments.
+
+    The auth router stays mounted in every mode so the OpenAPI spec — and the
+    clients generated from it — don't vary with AUTH_PROVIDER; the gate has to
+    happen at request time. Without it, the SaaS deployment accepts
+    unauthenticated signups that mint oss_* users bypassing Stack Auth.
+    """
+    if AUTH_PROVIDER != "local":
+        raise HTTPException(status_code=404, detail="Not found")
 
 
 async def get_user(
@@ -94,6 +111,11 @@ async def get_user(
         ) = await db_client.get_or_create_organization_by_provider_id(
             org_provider_id=selected_team_id, user_id=user_model.id
         )
+        if org_was_created:
+            _sync_created_organization_to_posthog(
+                organization=organization,
+                stack_user=stack_user,
+            )
 
         # Check if user's selected organization differs from the current organization
         if user_model.selected_organization_id != organization.id:
@@ -106,6 +128,13 @@ async def get_user(
 
             # Update the user_model object to reflect the change
             user_model.selected_organization_id = organization.id
+
+            _associate_user_with_posthog_organization(
+                user=user_model,
+                organization=organization,
+                stack_user=stack_user,
+                org_was_created=org_was_created,
+            )
 
             # Only create default configuration if organization was just created
             # This prevents race conditions where multiple concurrent requests
@@ -154,6 +183,97 @@ async def get_user(
         )
 
     return user_model
+
+
+def _sync_created_organization_to_posthog(
+    *,
+    organization,
+    stack_user: dict | None = None,
+    created_by_provider_id: str | None = None,
+) -> None:
+    """Create/update the PostHog organization group for a newly-created org."""
+    try:
+        organization_id = int(organization.id)
+        organization_provider_id = getattr(organization, "provider_id", None)
+        created_by = created_by_provider_id
+        if created_by is None and stack_user and stack_user.get("id"):
+            created_by = str(stack_user["id"])
+        properties = {
+            "organization_id": organization_id,
+            "organization_provider_id": organization_provider_id,
+            "auth_provider": "stack",
+        }
+        if created_by:
+            properties["created_by_provider_id"] = created_by
+
+        group_identify(
+            POSTHOG_ORGANIZATION_GROUP_TYPE,
+            str(organization_id),
+            properties,
+            distinct_id=created_by,
+        )
+        if created_by:
+            capture_event(
+                distinct_id=created_by,
+                event=PostHogEvent.ORGANIZATION_CREATED,
+                properties=properties,
+                groups={POSTHOG_ORGANIZATION_GROUP_TYPE: str(organization_id)},
+            )
+    except Exception:
+        logger.exception("Failed to sync created organization to PostHog")
+
+
+def _associate_user_with_posthog_organization(
+    *,
+    user: UserModel,
+    organization,
+    stack_user: dict | None = None,
+    user_distinct_id: str | None = None,
+    org_was_created: bool,
+    organization_ids: list[int] | None = None,
+    selected_organization_id: int | None = None,
+    selected_organization_provider_id: str | None = None,
+) -> None:
+    """Attach the Stack user to the PostHog organization group."""
+    try:
+        organization_id = int(organization.id)
+        organization_provider_id = getattr(organization, "provider_id", None)
+        if user_distinct_id is None:
+            if stack_user and stack_user.get("id"):
+                user_distinct_id = str(stack_user["id"])
+            else:
+                user_distinct_id = str(user.provider_id)
+        selected_org_id = selected_organization_id or organization_id
+        selected_org_provider_id = (
+            selected_organization_provider_id or organization_provider_id
+        )
+        person_properties = {
+            "user_id": user.id,
+            "user_provider_id": user_distinct_id,
+            "selected_organization_id": selected_org_id,
+            "selected_organization_provider_id": selected_org_provider_id,
+        }
+        if organization_ids is not None:
+            person_properties["organization_ids"] = organization_ids
+        if user.email:
+            person_properties["email"] = user.email
+        set_person_properties(user_distinct_id, person_properties)
+        event_properties = {
+            "user_id": user.id,
+            "organization_id": organization_id,
+            "organization_provider_id": organization_provider_id,
+            "auth_provider": "stack",
+            "organization_was_created": org_was_created,
+        }
+
+        capture_event(
+            distinct_id=user_distinct_id,
+            event=PostHogEvent.ORGANIZATION_USER_ASSOCIATED,
+            properties=event_properties,
+            groups={POSTHOG_ORGANIZATION_GROUP_TYPE: str(organization_id)},
+        )
+    except Exception:
+        logger.exception("Failed to associate user with PostHog organization")
 
 
 async def get_user_with_selected_organization(
@@ -297,6 +417,11 @@ async def create_user_configuration_with_mps_key(
                         "provider": ServiceProviders.DOGRAH.value,
                         "api_key": [service_key],
                         "model": "default",
+                    },
+                    "embeddings": {
+                        "provider": ServiceProviders.DOGRAH.value,
+                        "api_key": [service_key],
+                        "model": "dograh_embedding_v1",
                     },
                 }
                 effective_config = EffectiveAIModelConfiguration(**configuration)

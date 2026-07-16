@@ -1,10 +1,20 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from pipecat.processors.aggregators.llm_context import LLMSpecificMessage
 
-from api.db.models import OrganizationModel, UserModel
+from api.db.models import OrganizationModel, UserModel, organization_users_association
+from api.enums import OrganizationConfigurationKey
 from api.schemas.ai_model_configuration import EffectiveAIModelConfiguration
+from api.services.configuration.ai_model_configuration import (
+    convert_legacy_ai_model_configuration_to_v2,
+)
+from api.services.workflow.text_chat_runner import (
+    _deserialize_text_chat_checkpoint_messages,
+    _serialize_text_chat_checkpoint_messages,
+)
 from api.tests.integrations._run_pipeline_helpers import USER_CONFIGURATION
 from pipecat.tests import MockLLMService
 
@@ -16,6 +26,49 @@ def _log_texts(logs: dict | None, event_type: str) -> list[str]:
         for event in events
         if event.get("type") == event_type
     ]
+
+
+def test_text_chat_checkpoint_messages_round_trip_google_thought_signature():
+    signature = bytes.fromhex("12340a32010c39d6c7f38fd8b8eb6ab0")
+    messages = [
+        {"role": "assistant", "content": "Hello."},
+        {
+            "role": "user",
+            "content": "Hi",
+        },
+        LLMSpecificMessage(
+            llm="google",
+            message={
+                "type": "thought_signature",
+                "signature": signature,
+                "bookmark": {"text": "Hello."},
+            },
+        ),
+    ]
+
+    encoded = _serialize_text_chat_checkpoint_messages(messages)
+
+    json.dumps(encoded)
+    assert encoded[-1] == {
+        "__specific__": True,
+        "llm": "google",
+        "message": {
+            "type": "thought_signature",
+            "signature": {
+                "__type__": "bytes",
+                "__data__": "EjQKMgEMOdbH84/YuOtqsA==",
+            },
+            "bookmark": {"text": "Hello."},
+        },
+    }
+
+    restored = _deserialize_text_chat_checkpoint_messages(encoded)
+
+    assert restored[:2] == messages[:2]
+    assert isinstance(restored[-1], LLMSpecificMessage)
+    assert restored[-1].llm == "google"
+    assert restored[-1].message["signature"] == signature
+    assert restored[-1].message["bookmark"] == {"text": "Hello."}
 
 
 async def _create_user_and_workflow(
@@ -35,10 +88,23 @@ async def _create_user_and_workflow(
     )
     async_session.add(user)
     await async_session.flush()
+    await async_session.execute(
+        organization_users_association.insert().values(
+            user_id=user.id,
+            organization_id=org.id,
+        )
+    )
 
-    await db_session.update_user_configuration(
-        user_id=user.id,
-        configuration=EffectiveAIModelConfiguration.model_validate(USER_CONFIGURATION),
+    user_configuration = EffectiveAIModelConfiguration.model_validate(
+        USER_CONFIGURATION
+    )
+    await db_session.upsert_configuration(
+        org.id,
+        OrganizationConfigurationKey.MODEL_CONFIGURATION_V2.value,
+        convert_legacy_ai_model_configuration_to_v2(user_configuration).model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
     )
 
     workflow = await db_session.create_workflow(
@@ -1030,10 +1096,23 @@ async def test_text_chat_session_creation_requires_selected_org_scope(
     )
     async_session.add(user)
     await async_session.flush()
+    await async_session.execute(
+        organization_users_association.insert().values(
+            user_id=user.id,
+            organization_id=org_a.id,
+        )
+    )
 
-    await db_session.update_user_configuration(
-        user_id=user.id,
-        configuration=EffectiveAIModelConfiguration.model_validate(USER_CONFIGURATION),
+    user_configuration = EffectiveAIModelConfiguration.model_validate(
+        USER_CONFIGURATION
+    )
+    await db_session.upsert_configuration(
+        org_a.id,
+        OrganizationConfigurationKey.MODEL_CONFIGURATION_V2.value,
+        convert_legacy_ai_model_configuration_to_v2(user_configuration).model_dump(
+            mode="json",
+            exclude_none=True,
+        ),
     )
 
     workflow = await db_session.create_workflow(
@@ -1105,7 +1184,7 @@ async def test_text_chat_session_creation_rejects_quota_before_creating_run(
 
     async with test_client_factory(user) as client:
         with patch(
-            "api.routes.workflow_text_chat.check_dograh_quota",
+            "api.routes.workflow_text_chat.authorize_workflow_run_start",
             new=AsyncMock(
                 return_value=SimpleNamespace(
                     has_quota=False,
@@ -1120,11 +1199,16 @@ async def test_text_chat_session_creation_rejects_quota_before_creating_run(
 
     assert create_response.status_code == 402
     assert create_response.json()["detail"] == "Quota exceeded"
-    _, total_count = await db_session.get_workflow_runs_by_workflow_id(
+    runs, total_count = await db_session.get_workflow_runs_by_workflow_id(
         workflow.id,
         organization_id=workflow.organization_id,
     )
-    assert total_count == 0
+    assert total_count == 1
+    text_session = await db_session.get_workflow_run_text_session(
+        runs[0].id,
+        organization_id=workflow.organization_id,
+    )
+    assert text_session is None
 
 
 @pytest.mark.asyncio
@@ -1168,7 +1252,7 @@ async def test_text_chat_append_rejects_quota_without_mutating_session(
     async with test_client_factory(user) as client:
         with (
             patch(
-                "api.routes.workflow_text_chat.check_dograh_quota",
+                "api.routes.workflow_text_chat.authorize_workflow_run_start",
                 new=AsyncMock(
                     side_effect=[
                         SimpleNamespace(has_quota=True, error_message=""),

@@ -5,6 +5,8 @@ import {
     ChevronRight,
     CircleDollarSign,
     CreditCard,
+    ExternalLink,
+    Info,
     RefreshCw,
 } from "lucide-react";
 import Link from "next/link";
@@ -114,7 +116,7 @@ export default function BillingPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const auth = useAuth();
-    const { config } = useAppConfig();
+    const { config, loading: configLoading } = useAppConfig();
     const [credits, setCredits] = useState<MpsBillingCreditsResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
@@ -123,8 +125,9 @@ export default function BillingPage() {
         () => getPageFromSearchParams(searchParams),
     );
 
-    const isBillingV2 = credits?.billing_version === "v2";
-    const canPurchaseCredits = isBillingV2 && config?.deploymentMode !== "oss";
+    const hasAppConfig = !configLoading && config !== null;
+    const isOssMode = hasAppConfig && config.deploymentMode === "oss";
+    const canPurchaseCredits = hasAppConfig && config.deploymentMode !== "oss";
     const totalQuota = credits?.total_quota ?? 0;
     const remainingCredits = credits?.remaining_credits ?? 0;
     const usedCredits = credits?.total_credits_used ?? 0;
@@ -226,7 +229,7 @@ export default function BillingPage() {
         }
     };
 
-    if (loading) {
+    if (loading || configLoading) {
         return (
             <div className="container mx-auto p-6 space-y-6">
                 <div className="space-y-2">
@@ -265,10 +268,40 @@ export default function BillingPage() {
                 </div>
             </div>
 
+            {isOssMode && (
+                <div className="flex gap-3 rounded-lg border border-amber-200 bg-amber-50 p-4 dark:border-amber-900/50 dark:bg-amber-950/30">
+                    <Info className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-amber-400" />
+                    <div className="text-sm text-amber-900 dark:text-amber-200">
+                        <p className="font-medium">Credit purchases are unavailable in OSS mode</p>
+                        <p className="mt-1">
+                            You can&apos;t purchase credits from this self-hosted app. Sign up and
+                            purchase credits at{" "}
+                            <a
+                                href="https://app.dograh.com"
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1 font-medium underline underline-offset-2"
+                            >
+                                app.dograh.com
+                                <ExternalLink className="h-3 w-3" />
+                            </a>
+                            . Then add the generated service key in{" "}
+                            <Link
+                                href="/model-configurations"
+                                className="font-medium underline underline-offset-2"
+                            >
+                                Model Configurations
+                            </Link>
+                            . Usage for that service key is visible in app.dograh.com.
+                        </p>
+                    </div>
+                </div>
+            )}
+
             <div className="grid gap-4 md:grid-cols-2">
                 <Card>
                     <CardHeader className="pb-2">
-                        <CardDescription>{isBillingV2 ? "Credit balance" : "Credits remaining"}</CardDescription>
+                        <CardDescription>{isOssMode ? "Credits remaining" : "Credit balance"}</CardDescription>
                         <CardTitle className="flex items-center gap-2 text-3xl">
                             <CircleDollarSign className="h-6 w-6 text-muted-foreground" />
                             {formatCredits(remainingCredits)}
@@ -286,13 +319,13 @@ export default function BillingPage() {
                     </CardHeader>
                     <CardContent>
                         <p className="text-sm text-muted-foreground">
-                            {isBillingV2 ? "Total ledger debits" : "Current allocation usage"}
+                            {isOssMode ? "Current allocation usage" : "Total ledger debits"}
                         </p>
                     </CardContent>
                 </Card>
             </div>
 
-            {isBillingV2 ? (
+            {!isOssMode ? (
                 <Card>
                     <CardHeader>
                         <CardTitle>Credit Ledger</CardTitle>
