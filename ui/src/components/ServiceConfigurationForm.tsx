@@ -33,6 +33,7 @@ interface SchemaProperty {
     format?: string;
     multiline?: boolean;
     docs_url?: string;
+    hidden_if?: Record<string, string>;
 }
 
 export interface ProviderSchema {
@@ -503,12 +504,30 @@ export function ServiceConfigurationForm({
         }
     };
 
-    const getConfigFields = (service: ServiceSegment): string[] => {
+    const getConfigFields = (service: ServiceSegment) => {
         const currentProvider = serviceProviders[service];
         const providerSchema = schemas?.[service]?.[currentProvider];
-        if (!providerSchema) return [];
+        if (!providerSchema?.properties) return [];
+
         return Object.keys(providerSchema.properties).filter(
-            field => field !== "provider" && field !== "api_key"
+            field => {
+                if (field === "provider" || field === "api_key") return false;
+                const schema = providerSchema.properties[field];
+                const actualSchema = schema?.$ref && providerSchema.$defs
+                    ? providerSchema.$defs[schema.$ref.split('/').pop() || '']
+                    : schema;
+
+                if (actualSchema?.hidden_if) {
+                    let shouldHide = false;
+                    Object.entries(actualSchema.hidden_if).forEach(([depField, depValue]) => {
+                        const val = watch(`${service}_${depField}`);
+                        // Compare as strings: form values may be boolean but schema values are always strings
+                        if (String(val) === String(depValue)) shouldHide = true;
+                    });
+                    if (shouldHide) return false;
+                }
+                return true;
+            }
         );
     };
 
@@ -677,6 +696,24 @@ export function ServiceConfigurationForm({
             ? providerSchema.$defs[schema.$ref.split('/').pop() || '']
             : schema;
 
+        if (actualSchema?.type === "boolean") {
+            const isChecked = !!watch(`${service}_${field}`);
+            return (
+                <div className="flex items-center space-x-2 h-10">
+                    <Switch
+                        id={`switch-${service}-${field}`}
+                        checked={isChecked}
+                        onCheckedChange={(checked) => {
+                            setValue(`${service}_${field}`, checked, { shouldDirty: true });
+                        }}
+                    />
+                    <Label htmlFor={`switch-${service}-${field}`} className="text-sm font-normal cursor-pointer">
+                        {isChecked ? "True" : "False"}
+                    </Label>
+                </div>
+            );
+        }
+
         if (service === "tts" && field === "voice" && !actualSchema?.allow_custom_input) {
             const hasVoiceOptions = actualSchema?.enum || actualSchema?.examples;
             if (!hasVoiceOptions) {
@@ -774,30 +811,38 @@ export function ServiceConfigurationForm({
         }
 
         if (dropdownOptions && dropdownOptions.length > 0) {
-            const getDisplayName = (value: string) => {
+            const getDisplayName = (value: string | boolean) => {
+                if (typeof value === "boolean") {
+                    return value ? "True" : "False";
+                }
                 if (field === "language") {
-                    return LANGUAGE_DISPLAY_NAMES[value] || value;
+                    return LANGUAGE_DISPLAY_NAMES[value as string] || value;
                 }
                 if (field === "voice") {
-                    return VOICE_DISPLAY_NAMES[value] || value.charAt(0).toUpperCase() + value.slice(1);
+                    return VOICE_DISPLAY_NAMES[value as string] || (typeof value === 'string' ? value.charAt(0).toUpperCase() + value.slice(1) : String(value));
                 }
-                return value;
+                return String(value);
             };
 
             return (
                 <Select
-                    value={watch(`${service}_${field}`) as string || ""}
+                    value={String(watch(`${service}_${field}`) ?? "")}
                     onValueChange={(value) => {
                         if (!value) return;
-                        setValue(`${service}_${field}`, value, { shouldDirty: true });
+
+                        let parsedValue: string | boolean = value;
+                        if (value === "true") parsedValue = true;
+                        else if (value === "false") parsedValue = false;
+
+                        setValue(`${service}_${field}`, parsedValue, { shouldDirty: true });
                     }}
                 >
                     <SelectTrigger className="w-full">
                         <SelectValue placeholder={`Select ${field}`} />
                     </SelectTrigger>
                     <SelectContent>
-                        {dropdownOptions.map((value: string) => (
-                            <SelectItem key={value} value={value}>
+                        {dropdownOptions.map((value: string | boolean) => (
+                            <SelectItem key={String(value)} value={String(value)}>
                                 {getDisplayName(value)}
                             </SelectItem>
                         ))}

@@ -4,7 +4,7 @@ Extracts prompt and function composition logic from PipecatEngine into
 reusable functions. Defines recording response mode markers and instructions.
 """
 
-from typing import TYPE_CHECKING, Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional, Any
 
 if TYPE_CHECKING:
     from api.services.workflow.pipecat_engine_custom_tools import CustomToolManager
@@ -12,8 +12,11 @@ if TYPE_CHECKING:
 
 from api.services.workflow.pipecat_engine_custom_tools import get_function_schema
 from api.services.workflow.tools.knowledge_base import get_knowledge_base_tool
+from api.services.configuration.registry import ServiceProviders
+from api.services.pipecat.rumik_prompts import RUMIK_MUGA_SYSTEM_PROMPT, RUMIK_MULBERRY_SYSTEM_PROMPT
 
 # ---------------------------------------------------------------------------
+
 # Recording response mode markers
 # ---------------------------------------------------------------------------
 
@@ -52,6 +55,7 @@ def compose_system_prompt_for_node(
     workflow: "WorkflowGraph",
     format_prompt: Callable[[str], str],
     has_recordings: bool,
+    tts_config: Optional[Any] = None,
 ) -> str:
     """Compose the full system prompt text for a workflow node.
 
@@ -79,6 +83,19 @@ def compose_system_prompt_for_node(
 
     if has_recordings and "RECORDING_ID:" in formatted_node_prompt:
         parts.append(RECORDING_RESPONSE_MODE_INSTRUCTIONS)
+
+    if tts_config and getattr(tts_config, "provider", None) == ServiceProviders.RUMIK.value:
+        inject_tts_prompt = getattr(tts_config, "inject_tts_prompt", False)
+        if inject_tts_prompt:
+            custom_prompt = getattr(tts_config, "tts_system_prompt", None)
+            if custom_prompt:
+                parts.append(custom_prompt)
+            else:
+                model = getattr(tts_config, "model", None)
+                if model == "muga":
+                    parts.append(RUMIK_MUGA_SYSTEM_PROMPT)
+                elif model == "mulberry":
+                    parts.append(RUMIK_MULBERRY_SYSTEM_PROMPT)
 
     return "\n\n".join(parts)
 

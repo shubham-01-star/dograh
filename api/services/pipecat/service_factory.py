@@ -568,6 +568,7 @@ def create_tts_service(
             voice=user_config.tts.voice,
             description=getattr(user_config.tts, "description", None),
             speaker=getattr(user_config.tts, "speaker", None),
+            persistent_session=getattr(user_config.tts, "persistent_session", True),
             f0_up_key=getattr(user_config.tts, "f0_up_key", 0),
             temperature=getattr(user_config.tts, "temperature", 0.6),
             top_p=getattr(user_config.tts, "top_p", 0.95),

@@ -383,18 +383,18 @@ async def get_voices(
     """Get available voices for a TTS provider."""
     if provider == "rumik":
         voices = [
-            # muga tones
-            VoiceInfo(voice_id="[neutral]", name="Muga - Neutral Tone", gender="Unspecified", description="Prefixes text with [neutral] for muga model"),
-            VoiceInfo(voice_id="[happy]", name="Muga - Happy Tone", gender="Unspecified", description="Prefixes text with [happy] for muga model"),
-            VoiceInfo(voice_id="[sad]", name="Muga - Sad Tone", gender="Unspecified", description="Prefixes text with [sad] for muga model"),
-            VoiceInfo(voice_id="[excited]", name="Muga - Excited Tone", gender="Unspecified", description="Prefixes text with [excited] for muga model"),
-            VoiceInfo(voice_id="[angry]", name="Muga - Angry Tone", gender="Unspecified", description="Prefixes text with [angry] for muga model"),
-            VoiceInfo(voice_id="[whisper]", name="Muga - Whisper Tone", gender="Unspecified", description="Prefixes text with [whisper] for muga model"),
-            # mulberry speakers
-            VoiceInfo(voice_id="speaker_1", name="Mulberry - Speaker 1", gender="Female", description="Studio voice 1 for mulberry model"),
-            VoiceInfo(voice_id="speaker_2", name="Mulberry - Speaker 2", gender="Male", description="Studio voice 2 for mulberry model"),
-            VoiceInfo(voice_id="speaker_3", name="Mulberry - Speaker 3", gender="Female", description="Studio voice 3 for mulberry model"),
-            VoiceInfo(voice_id="speaker_4", name="Mulberry - Speaker 4", gender="Male", description="Studio voice 4 for mulberry model"),
+            VoiceInfo(voice_id="emma", name="Mulberry - Emma", gender="Female", description="Named speaker (emma)"),
+            VoiceInfo(voice_id="mia", name="Mulberry - Mia", gender="Female", description="Named speaker (mia)"),
+            VoiceInfo(voice_id="sophia", name="Mulberry - Sophia", gender="Female", description="Named speaker (sophia)"),
+            VoiceInfo(voice_id="ava", name="Mulberry - Ava", gender="Female", description="Named speaker (ava)"),
+            VoiceInfo(voice_id="ira", name="Mulberry - Ira", gender="Female", description="Named speaker (ira)"),
+            VoiceInfo(voice_id="siya", name="Mulberry - Siya", gender="Female", description="Named speaker (siya)"),
+            VoiceInfo(voice_id="aisha", name="Mulberry - Aisha", gender="Female", description="Named speaker (aisha)"),
+            VoiceInfo(voice_id="zoya", name="Mulberry - Zoya", gender="Female", description="Named speaker (zoya)"),
+            VoiceInfo(voice_id="lucas", name="Mulberry - Lucas", gender="Male", description="Named speaker (lucas)"),
+            VoiceInfo(voice_id="noah", name="Mulberry - Noah", gender="Male", description="Named speaker (noah)"),
+            VoiceInfo(voice_id="theo", name="Mulberry - Theo", gender="Male", description="Named speaker (theo)"),
+            VoiceInfo(voice_id="adam", name="Mulberry - Adam", gender="Male", description="Named speaker (adam)"),
             VoiceInfo(voice_id="custom", name="Mulberry - Custom Voice", gender="Unspecified", description="Uses the natural-language description field to steer"),
         ]
         return VoicesResponse(provider="rumik", voices=voices)

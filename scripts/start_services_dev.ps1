@@ -181,3 +181,7 @@ Write-Host "Health: curl.exe http://localhost:$($env:UVICORN_BASE_PORT)/api/v1/h
 Write-Host "Logs:   Get-Content logs/latest/*.log -Wait"
 Write-Host "Stop:   .\scripts\stop_services.ps1"
 Write-Host "------------------------------------------------------"
+
+while ($true) {
+    Start-Sleep -Seconds 1
+}

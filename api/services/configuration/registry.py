@@ -1138,29 +1138,44 @@ class RumikTTSConfiguration(BaseTTSConfiguration):
         description="Rumik TTS model.",
         json_schema_extra={"examples": RUMIK_TTS_MODELS},
     )
-    voice: str = Field(
-        default="[neutral]",
-        description="Rumik voice ID/tone tag (e.g. '[neutral]', '[happy]', '[sad]', '[excited]', '[angry]', '[whisper]', 'speaker_1', 'speaker_2', 'speaker_3', 'speaker_4').",
+    voice: str | None = Field(
+        default=None,
+        description="Optional. For Mulberry: select a speaker (e.g. 'siya'). For Muga: leave blank as tone is controlled dynamically by the system prompt.",
+        json_schema_extra={"hidden_if": {"model": "muga"}},
     )
     description: str | None = Field(
         default=None,
         description="Natural-language description to steer the voice (mulberry model only). Omit when using preset speaker.",
+        json_schema_extra={"hidden_if": {"model": "muga"}},
     )
     speaker: str | None = Field(
         default=None,
-        description="Preset voice speaker_1..speaker_4 (mulberry model only).",
+        description="Preset named voice (mulberry model only).",
+        json_schema_extra={"hidden_if": {"model": "muga"}},
+    )
+    inject_tts_prompt: Literal[True, False] = Field(
+        default=True,
+        description="Automatically inject prompt instructions for tone tagging.",
+    )
+    tts_system_prompt: str | None = Field(
+        default=None,
+        description="Custom prompt instructions to override the default ones.",
+        json_schema_extra={"hidden_if": {"inject_tts_prompt": "false"}, "multiline": True},
     )
     f0_up_key: int = Field(
         default=0,
         ge=-12,
         le=12,
         description="Pitch shift in semitones (mulberry with speaker voice).",
+        json_schema_extra={"hidden_if": {"model": "muga"}},
     )
     temperature: float = Field(
         default=0.6,
-        ge=0.0,
-        le=2.0,
-        description="Sampling temperature.",
+        description="Sampling temperature. Lower is more consistent.",
+    )
+    persistent_session: Literal[True, False] = Field(
+        default=True,
+        description="Keep the WebSocket open for the entire call for lower latency and native barge-in.",
     )
     top_p: float = Field(
         default=0.95,

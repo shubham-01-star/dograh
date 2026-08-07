@@ -38,7 +38,7 @@ class TestRumikTTSConfiguration:
         cfg = RumikTTSConfiguration(api_key="test-key")
         assert cfg.provider == ServiceProviders.RUMIK
         assert cfg.model == "muga"
-        assert cfg.voice == "[neutral]"
+        assert cfg.voice is None
         assert cfg.description is None
         assert cfg.speaker is None
         assert cfg.f0_up_key == 0
@@ -47,27 +47,28 @@ class TestRumikTTSConfiguration:
         assert cfg.top_k == 50
         assert cfg.repetition_penalty == 1.2
         assert cfg.max_new_tokens == 2048
+        assert cfg.persistent_session is True
 
     def test_custom_values(self):
         cfg = RumikTTSConfiguration(
             api_key="k",
             model="mulberry",
-            voice="speaker_2",
-            description="warm, friendly voice",
-            speaker="speaker_2",
-            f0_up_key=5,
-            temperature=0.8,
+            voice="siya",
+            description="A happy voice",
+            speaker="siya",
+            f0_up_key=2,
+            temperature=0.58,
             top_p=0.9,
             top_k=40,
             repetition_penalty=1.0,
             max_new_tokens=1024,
         )
         assert cfg.model == "mulberry"
-        assert cfg.voice == "speaker_2"
-        assert cfg.description == "warm, friendly voice"
-        assert cfg.speaker == "speaker_2"
-        assert cfg.f0_up_key == 5
-        assert cfg.temperature == 0.8
+        assert cfg.voice == "siya"
+        assert cfg.description == "A happy voice"
+        assert cfg.speaker == "siya"
+        assert cfg.f0_up_key == 2
+        assert cfg.temperature == 0.58
         assert cfg.top_p == 0.9
         assert cfg.top_k == 40
         assert cfg.repetition_penalty == 1.0
@@ -121,7 +122,7 @@ class TestServiceFactoryRumik:
                     provider=ServiceProviders.RUMIK.value,
                     api_key="test-api-key",
                     model="muga",
-                    voice="[neutral]",
+                    voice=None,
                     description=None,
                     speaker=None,
                     f0_up_key=0,
@@ -130,6 +131,7 @@ class TestServiceFactoryRumik:
                     top_k=50,
                     repetition_penalty=1.2,
                     max_new_tokens=2048,
+                    persistent_session=True,
                 )
             )
             audio_config = SimpleNamespace(
@@ -141,7 +143,7 @@ class TestServiceFactoryRumik:
             assert isinstance(tts, RumikTTSService)
             assert tts._api_key == "test-api-key"
             assert tts._settings.model == "muga"
-            assert tts._settings.voice == "[neutral]"
+            assert tts._settings.voice is None
 
 
 # ---------------------------------------------------------------------------
@@ -200,6 +202,7 @@ class TestRumikPipelineIntegration:
         # Instantiate service
         service = RumikTTSService(api_key="rk_test", aiohttp_session=mock_session)
         service._settings.voice = "[happy]"
+        service._settings.persistent_session = False
 
         # Set metrics mock to avoid real tracking side-effects
         service.start_ttfb_metrics = AsyncMock()
@@ -239,6 +242,7 @@ class TestRumikPipelineIntegration:
         mock_session.post.return_value.__aenter__.return_value = mock_response
 
         service = RumikTTSService(api_key="bad_key", aiohttp_session=mock_session)
+        service._settings.persistent_session = False
         service.start_ttfb_metrics = AsyncMock()
         service.stop_ttfb_metrics = AsyncMock()
 
