@@ -8,14 +8,13 @@ from pipecat.processors.aggregators.llm_context import LLMContext
 
 from api.db.models import WorkflowRunModel
 from api.services.gen_ai.json_parser import parse_llm_json
-from api.services.pipecat.service_factory import create_llm_service_from_provider
 from api.services.workflow.dto import QANodeData
 from api.services.workflow.qa.conversation import (
     build_conversation_structure,
     format_transcript,
     split_events_by_node,
 )
-from api.services.workflow.qa.llm_config import resolve_llm_config
+from api.services.workflow.qa.llm_config import create_qa_llm_service
 from api.services.workflow.qa.metrics import compute_call_metrics
 from api.services.workflow.qa.node_summary import (
     CONVERSATION_SUMMARY_SYSTEM_PROMPT,
@@ -114,15 +113,13 @@ async def run_per_node_qa_analysis(
         logger.warning("No system prompt defined for QA Node")
         return {"error": "no_system_prompt", "node_results": {}}
 
-    # Resolve LLM config
-    provider, model, api_key, service_kwargs = await resolve_llm_config(
-        qa_data, workflow_run
-    )
-    if not api_key:
+    resolved_llm = await create_qa_llm_service(qa_data, workflow_run)
+    if resolved_llm is None:
         logger.warning(
-            f"No LLM API key configured for QA analysis on run {workflow_run_id}"
+            f"No LLM configuration available for QA analysis on run {workflow_run_id}"
         )
         return {"error": "no_api_key", "node_results": {}}
+    llm, model = resolved_llm
 
     # Ensure node summaries
     node_summaries = await ensure_node_summaries(
@@ -131,9 +128,6 @@ async def run_per_node_qa_analysis(
 
     # Set up Langfuse tracing
     parent_ctx = setup_langfuse_parent_context(workflow_run)
-
-    # Build LLM service
-    llm = create_llm_service_from_provider(provider, model, api_key, **service_kwargs)
 
     node_results: dict[str, Any] = {}
     prior_conversation: list[dict] = []  # Running accumulation of all prior nodes
@@ -206,6 +200,16 @@ async def run_per_node_qa_analysis(
         }
         try:
             parsed = parse_llm_json(raw_response)
+            # parse_llm_json can return a list (e.g. when the model emits a
+            # top-level JSON array); coerce non-dict results so the .get()
+            # lookups below don't raise AttributeError.
+            if not isinstance(parsed, dict):
+                logger.warning(
+                    f"QA LLM returned non-object JSON for node '{node_name}' "
+                    f"on run {workflow_run_id}; got {type(parsed).__name__}, "
+                    "using empty QA result"
+                )
+                parsed = {}
             node_result["tags"] = parsed.get("tags", [])
             node_result["summary"] = parsed.get("summary", "")
             node_result["score"] = parsed.get("call_quality_score")
@@ -258,15 +262,13 @@ async def _run_whole_call_qa_analysis(
         logger.warning("No system prompt defined for QA Node")
         return {"error": "no_system_prompt", "node_results": {}}
 
-    provider, model, api_key, service_kwargs = await resolve_llm_config(
-        qa_data, workflow_run
-    )
-
-    if not api_key:
+    resolved_llm = await create_qa_llm_service(qa_data, workflow_run)
+    if resolved_llm is None:
         logger.warning(
-            f"No LLM API key configured for QA analysis on run {workflow_run_id}"
+            f"No LLM configuration available for QA analysis on run {workflow_run_id}"
         )
         return {"error": "no_api_key", "node_results": {}}
+    llm, model = resolved_llm
 
     # Build messages — substitute all placeholders with sensible defaults
     template_context = {
@@ -279,9 +281,6 @@ async def _run_whole_call_qa_analysis(
     messages = [
         {"role": "user", "content": f"## Transcript\n{transcript}"},
     ]
-
-    # Call LLM
-    llm = create_llm_service_from_provider(provider, model, api_key, **service_kwargs)
 
     try:
         raw_response = await _run_llm_inference(llm, messages, system_content)
@@ -296,6 +295,16 @@ async def _run_whole_call_qa_analysis(
     }
     try:
         parsed = parse_llm_json(raw_response)
+        # parse_llm_json can return a list (e.g. when the model emits a
+        # top-level JSON array); coerce non-dict results so the .get()
+        # lookups below don't raise AttributeError.
+        if not isinstance(parsed, dict):
+            logger.warning(
+                f"QA LLM returned non-object JSON for whole-call QA on run "
+                f"{workflow_run_id}; got {type(parsed).__name__}, using empty "
+                "QA result"
+            )
+            parsed = {}
         node_result["tags"] = parsed.get("tags", [])
         node_result["summary"] = parsed.get("summary", "")
         node_result["score"] = parsed.get("call_quality_score")

@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, CheckCircle, ChevronLeft, ChevronRight, ExternalLink, Info, Loader2, RefreshCw } from 'lucide-react';
+import { AlertTriangle, ArrowDown, ArrowUp, ArrowUpDown, CheckCircle, ChevronLeft, ChevronRight, ExternalLink, FileText, Info, Loader2, RefreshCw } from 'lucide-react';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useCallback, useEffect, useState } from "react";
@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { useAuth } from '@/lib/auth';
+import { formatDateTime } from '@/lib/dateTime';
 import{ superadminFilterAttributes } from "@/lib/filterAttributes";
 import { decodeFiltersFromURL, encodeFiltersToURL } from '@/lib/filters';
 import { impersonateAsSuperadmin } from '@/lib/utils';
@@ -248,8 +249,6 @@ export default function RunsPage() {
      * ----------------------------------------------------------------------------------
      */
 
-    const formatDate = (dateString: string) => new Date(dateString).toLocaleString();
-
     const calculateDuration = (isCompleted: boolean, usageInfo?: Record<string, unknown>) => {
         if (isCompleted && typeof usageInfo?.call_duration_seconds === 'number') {
             return `${Number(usageInfo.call_duration_seconds).toFixed(2)}s`;
@@ -472,7 +471,7 @@ export default function RunsPage() {
                                                         </div>
                                                     </TableCell>
                                                     <TableCell className="text-sm">
-                                                        {formatDate(run.created_at)}
+                                                        {formatDateTime(run.created_at)}
                                                     </TableCell>
                                                     <TableCell>
                                                         <div className="flex space-x-2">
@@ -493,7 +492,7 @@ export default function RunsPage() {
                                                                                 {
                                                                                     field: 'extra.run_id',
                                                                                     op: '==',
-                                                                                    value: run.id,
+                                                                                    value: String(run.id),
                                                                                 },
                                                                             ],
                                                                             field: '',
@@ -541,23 +540,36 @@ export default function RunsPage() {
                                                                 />
                                                             </Button>
 
-                                                            {/* Quick-link to open the workflow inside the *regular* app after
-                                                                successfully impersonating the owner of the workflow. */}
+                                                            {/* Quick links open the regular app after impersonating the
+                                                                owner of the workflow run. */}
                                                             <Button
                                                                 variant="outline"
                                                                 size="icon"
                                                                 title="Open workflow as user"
+                                                                disabled={!run.user_id}
                                                                 onClick={() => {
-                                                                    const appBaseUrl = window.location.origin.includes('superadmin.')
-                                                                        ? window.location.origin.replace('superadmin.', 'app.')
-                                                                        : window.location.origin;
                                                                     impersonateAndMaybeRedirect(
                                                                         run.user_id,
-                                                                        `${appBaseUrl}/workflow/${run.workflow_id}`,
+                                                                        `/workflow/${run.workflow_id}`,
                                                                     );
                                                                 }}
                                                             >
                                                                 <ExternalLink className="h-4 w-4" />
+                                                            </Button>
+
+                                                            <Button
+                                                                variant="outline"
+                                                                size="icon"
+                                                                title="Open run details as user"
+                                                                disabled={!run.user_id}
+                                                                onClick={() => {
+                                                                    impersonateAndMaybeRedirect(
+                                                                        run.user_id,
+                                                                        `/workflow/${run.workflow_id}/run/${run.id}`,
+                                                                    );
+                                                                }}
+                                                            >
+                                                                <FileText className="h-4 w-4" />
                                                             </Button>
 
                                                         </div>

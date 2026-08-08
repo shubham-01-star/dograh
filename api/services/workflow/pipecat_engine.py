@@ -18,8 +18,12 @@ from pipecat.utils.enums import EndTaskReason
 
 from api.db import db_client
 from api.enums import ToolCategory
+from api.errors.failure import (
+    classify_exception,
+    failure_metadata_for_processor,
+    log_failure,
+)
 from api.services.pipecat.audio_playback import play_audio
-from api.services.workflow.disposition_mapper import apply_disposition_mapping
 from api.services.workflow.workflow_graph import Node, WorkflowGraph
 
 if TYPE_CHECKING:
@@ -64,6 +68,7 @@ class PipecatEngine:
         task: Optional[PipelineWorker] = None,
         llm: Optional["LLMService"] = None,
         inference_llm: Optional["LLMService"] = None,
+        variable_extraction_llm: Optional["LLMService"] = None,
         context: Optional[LLMContext] = None,
         workflow: WorkflowGraph,
         call_context_vars: dict,
@@ -89,6 +94,9 @@ class PipecatEngine:
         # that does not implement run_inference, so a separate text LLM
         # must be passed in.
         self.inference_llm = inference_llm or llm
+        # Variable extraction can use a separately tagged managed-model client
+        # without rerouting normal conversation or context-summarization calls.
+        self.variable_extraction_llm = variable_extraction_llm or self.inference_llm
         self.context = context
         self.workflow = workflow
         self._call_context_vars = call_context_vars
@@ -100,6 +108,10 @@ class PipecatEngine:
         self._gathered_context: dict = {}
         self._user_response_timeout_task: Optional[asyncio.Task] = None
         self._pending_extraction_tasks: set[asyncio.Task] = set()
+        # True once a final (synchronous) extraction has run, so the end-of-call
+        # and upstream-transfer paths don't redundantly re-extract the same
+        # terminal state.
+        self._final_extraction_done: bool = False
 
         # Will be set later in initialize() when we have
         # access to _context
@@ -348,7 +360,11 @@ class PipecatEngine:
         )
 
         # Register function with LLM
-        self.llm.register_function(name, transition_func)
+        self.llm.register_function(
+            name,
+            transition_func,
+            is_node_transition=True,
+        )
 
     async def _register_knowledge_base_function(
         self, document_uuids: list[str]
@@ -452,8 +468,17 @@ class PipecatEngine:
                     f"Variable extraction completed for node: {node.name}. Extracted: {extracted_data}"
                 )
             except Exception as e:
-                logger.error(
-                    f"Error during variable extraction for node {node.name}: {str(e)}"
+                metadata = failure_metadata_for_processor(self.variable_extraction_llm)
+                log_failure(
+                    classify_exception(
+                        e,
+                        source=metadata.source,
+                        provider=metadata.provider,
+                        error_owner=metadata.error_owner,
+                    ),
+                    organization_id=self._organization_id,
+                    workflow_run_id=self._workflow_run_id,
+                    node_name=node.name,
                 )
 
         if run_in_background:
@@ -506,6 +531,29 @@ class PipecatEngine:
                 f"Timed out waiting for pending extraction tasks after {timeout}s. "
                 f"Incomplete: {incomplete}"
             )
+
+    async def perform_final_variable_extraction(self) -> None:
+        """Flush in-flight + current-node variable extraction synchronously.
+
+        Awaits any background extractions still running from previous nodes,
+        then runs the current node's extraction inline so callers that need the
+        freshest extracted variables before acting can rely on them -- e.g.
+        end_call_with_reason before disposing the call, or an external-PBX
+        transfer that maps extracted variables into a provider lead update
+        call before handing the customer off.
+
+        Idempotent: only the first call does work. The external-PBX transfer
+        runs this just before forwarding update_lead, so the subsequent
+        end_call_with_reason would otherwise re-extract the same terminal state.
+        """
+        if self._final_extraction_done:
+            logger.debug("Final variable extraction already performed; skipping")
+            return
+        self._final_extraction_done = True
+        await self._await_pending_extractions()
+        await self._perform_variable_extraction_if_needed(
+            self._current_node, run_in_background=False
+        )
 
     async def _setup_llm_context(self, node: Node) -> None:
         """Common method to set up LLM context"""
@@ -743,50 +791,42 @@ class PipecatEngine:
             EndTaskReason.PIPELINE_ERROR.value,
             EndTaskReason.VOICEMAIL_DETECTED.value,
         ):
-            # Await any in-flight background extractions from previous nodes
-            await self._await_pending_extractions()
-
-            # Perform final variable extraction synchronously before ending
-            await self._perform_variable_extraction_if_needed(
-                self._current_node, run_in_background=False
-            )
+            # Flush in-flight + current-node extractions synchronously before ending
+            await self.perform_final_variable_extraction()
 
         frame_to_push = (
             CancelFrame(reason=reason) if abort_immediately else EndFrame(reason=reason)
         )
 
-        # Apply disposition mapping - first try call_disposition if it is,
-        # extracted from the call conversation then fall back to reason
-        call_disposition = self._gathered_context.get("call_disposition", "")
-        organization_id = await self._get_organization_id()
+        # Record the call disposition: prefer one extracted from the conversation,
+        # otherwise fall back to the disconnect reason.
+        call_disposition = self._gathered_context.get("call_disposition", "") or reason
+        self._gathered_context["call_disposition"] = call_disposition
+        self._gathered_context["mapped_call_disposition"] = call_disposition
 
         if call_disposition:
-            # If call_disposition exists, map it
-            mapped_disposition = await apply_disposition_mapping(
-                call_disposition, organization_id
-            )
-            # Store the original and mapped values
-            self._gathered_context["extracted_call_disposition"] = call_disposition
-            self._gathered_context["call_disposition"] = call_disposition
-            self._gathered_context["mapped_call_disposition"] = mapped_disposition
-        else:
-            # Otherwise, map the disconnect reason
-            mapped_disposition = await apply_disposition_mapping(
-                reason, organization_id
-            )
-            # Store the mapped disconnect reason
-            self._gathered_context["call_disposition"] = reason
-            self._gathered_context["mapped_call_disposition"] = mapped_disposition
-
-        effective_disposition = self._gathered_context.get("call_disposition", "")
-        if effective_disposition:
             call_tags = self._gathered_context.get("call_tags", [])
-            if effective_disposition not in call_tags:
-                call_tags.append(effective_disposition)
+            if call_disposition not in call_tags:
+                call_tags.append(call_disposition)
             self._gathered_context["call_tags"] = call_tags
 
+        # Hangup strategies run while serializing the terminal frame. Persist
+        # the final extracted values first so external-PBX adapters can apply
+        # workflow lead-field mappings before terminating the customer leg.
+        try:
+            await db_client.update_workflow_run(
+                run_id=self._workflow_run_id,
+                gathered_context=self._gathered_context,
+            )
+        except Exception as exc:
+            # Call teardown must never be held hostage by an enrichment write.
+            logger.warning(
+                f"Could not persist final gathered context before hangup: {exc}"
+            )
+
         logger.debug(
-            f"Finishing run with reason: {reason}, disposition: {mapped_disposition} queueing frame {frame_to_push}"
+            f"Finishing run with reason: {reason}, disposition: {call_disposition} "
+            f"queueing frame {frame_to_push}"
         )
         await self.task.queue_frame(frame_to_push)
 

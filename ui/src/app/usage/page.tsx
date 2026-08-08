@@ -2,12 +2,12 @@
 
 import { ChevronLeft, ChevronRight, Download, Globe } from 'lucide-react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useCallback, useEffect, useId, useState } from 'react';
+import { useCallback, useEffect, useId, useMemo, useState } from 'react';
 import TimezoneSelect, { type ITimezoneOption } from 'react-timezone-select';
 import { toast } from 'sonner';
 
-import { downloadUsageRunsReportApiV1OrganizationsUsageRunsReportGet, getDailyUsageBreakdownApiV1OrganizationsUsageDailyBreakdownGet, getPreferencesApiV1OrganizationsPreferencesGet, getUsageHistoryApiV1OrganizationsUsageRunsGet, savePreferencesApiV1OrganizationsPreferencesPut } from '@/client/sdk.gen';
-import type { DailyUsageBreakdownResponse, OrganizationPreferences, UsageHistoryResponse, WorkflowRunUsageResponse } from '@/client/types.gen';
+import { downloadUsageRunsReportApiV1OrganizationsUsageRunsReportGet, getDailyUsageBreakdownApiV1OrganizationsUsageDailyBreakdownGet, getPreferencesApiV1OrganizationsPreferencesGet, getUsageHistoryApiV1OrganizationsUsageRunsGet, getWorkflowsSummaryApiV1WorkflowSummaryGet, savePreferencesApiV1OrganizationsPreferencesPut } from '@/client/sdk.gen';
+import type { DailyUsageBreakdownResponse, OrganizationPreferences, UsageHistoryResponse, WorkflowRunUsageResponse, WorkflowSummaryResponse } from '@/client/types.gen';
 import { CallTypeCell } from '@/components/CallTypeCell';
 import { DailyUsageTable } from '@/components/DailyUsageTable';
 import { FilterBuilder } from '@/components/filters/FilterBuilder';
@@ -24,13 +24,40 @@ import {
     TableRow,
 } from '@/components/ui/table';
 import { useUserConfig } from '@/context/UserConfigContext';
+import { detailFromError } from '@/lib/apiError';
 import { useAuth } from '@/lib/auth';
+import { formatDateTime, getLocalTimezone } from '@/lib/dateTime';
 import { usageFilterAttributes } from '@/lib/filterAttributes';
 import { decodeFiltersFromURL, encodeFiltersToURL } from '@/lib/filters';
-import { ActiveFilter, DateRangeValue } from '@/types/filters';
+import type { ActiveFilter, DateRangeValue, FilterAttribute, NumberFilterOption } from '@/types/filters';
 
-// Get local timezone
-const getLocalTimezone = () => Intl.DateTimeFormat().resolvedOptions().timeZone;
+const buildAgentFilterAttributes = (
+    agentOptions: NumberFilterOption[] | null,
+    isLoadingAgentOptions: boolean
+): FilterAttribute[] => {
+    return usageFilterAttributes.map(attribute => {
+        if (attribute.id !== 'workflowId') {
+            return attribute;
+        }
+
+        return {
+            ...attribute,
+            label: 'Agent',
+            type: 'numberSelect',
+            config: {
+                ...attribute.config,
+                placeholder: 'Select an agent',
+                numberSelectLabel: 'Agent',
+                ...(agentOptions || isLoadingAgentOptions
+                    ? {
+                        numberSelectOptions: agentOptions ?? [],
+                        numberSelectOptionsLoading: isLoadingAgentOptions,
+                    }
+                    : {}),
+            },
+        } satisfies FilterAttribute;
+    });
+};
 
 export default function UsagePage() {
     const router = useRouter();
@@ -47,6 +74,12 @@ export default function UsagePage() {
     });
     const [isExecutingFilters, setIsExecutingFilters] = useState(false);
     const [isDownloadingReport, setIsDownloadingReport] = useState(false);
+    const [agentFilterOptions, setAgentFilterOptions] = useState<NumberFilterOption[] | null>(null);
+    const [isLoadingAgentFilterOptions, setIsLoadingAgentFilterOptions] = useState(false);
+    const availableUsageFilterAttributes = useMemo(
+        () => buildAgentFilterAttributes(agentFilterOptions, isLoadingAgentFilterOptions),
+        [agentFilterOptions, isLoadingAgentFilterOptions]
+    );
 
     // Daily usage breakdown state (only for paid orgs)
     const [dailyUsage, setDailyUsage] = useState<DailyUsageBreakdownResponse | null>(null);
@@ -56,10 +89,10 @@ export default function UsagePage() {
     // edits in the FilterBuilder; `appliedFilters` is what's actually been
     // committed via Apply (and what drives fetching + the download button).
     const [activeFilters, setActiveFilters] = useState<ActiveFilter[]>(() => {
-        return decodeFiltersFromURL(searchParams, usageFilterAttributes);
+        return decodeFiltersFromURL(searchParams, availableUsageFilterAttributes);
     });
     const [appliedFilters, setAppliedFilters] = useState<ActiveFilter[]>(() => {
-        return decodeFiltersFromURL(searchParams, usageFilterAttributes);
+        return decodeFiltersFromURL(searchParams, availableUsageFilterAttributes);
     });
 
     // Media preview dialog
@@ -93,7 +126,7 @@ export default function UsagePage() {
             if (otherFilters.length > 0) {
                 const filterData = otherFilters.map(filter => ({
                     attribute: filter.attribute.id,
-                    type: filter.attribute.type,
+                    type: filter.attribute.type === 'numberSelect' ? 'number' : filter.attribute.type,
                     value: filter.value,
                 }));
                 filterParam = JSON.stringify(filterData);
@@ -149,6 +182,37 @@ export default function UsagePage() {
             setIsLoadingDaily(false);
         }
     }, [auth.isAuthenticated, organizationPricing]);
+
+    const fetchAgentFilterOptions = useCallback(async () => {
+        if (!auth.isAuthenticated) return;
+
+        setIsLoadingAgentFilterOptions(true);
+        try {
+            const response = await getWorkflowsSummaryApiV1WorkflowSummaryGet({
+                query: {
+                    status: 'active',
+                },
+            });
+            if (response.error) {
+                throw new Error(detailFromError(response.error, 'Failed to load agents'));
+            }
+
+            const options = [...(response.data ?? [])]
+                .sort((a: WorkflowSummaryResponse, b: WorkflowSummaryResponse) => (
+                    a.name.localeCompare(b.name) || a.id - b.id
+                ))
+                .map((workflow: WorkflowSummaryResponse) => ({
+                    label: `${workflow.name || 'Untitled Agent'} (#${workflow.id})`,
+                    value: workflow.id,
+                }));
+            setAgentFilterOptions(options);
+        } catch (error) {
+            console.error('Failed to fetch agent filter options:', error);
+            setAgentFilterOptions(null);
+        } finally {
+            setIsLoadingAgentFilterOptions(false);
+        }
+    }, [auth.isAuthenticated]);
 
     const fetchPreferences = useCallback(async () => {
         if (!auth.isAuthenticated) return;
@@ -228,6 +292,33 @@ export default function UsagePage() {
         fetchPreferences();
     }, [fetchPreferences]);
 
+    useEffect(() => {
+        fetchAgentFilterOptions();
+    }, [fetchAgentFilterOptions]);
+
+    useEffect(() => {
+        setActiveFilters(currentFilters => {
+            let changed = false;
+            const nextFilters = currentFilters.map(filter => {
+                const updatedAttribute = availableUsageFilterAttributes.find(
+                    attribute => attribute.id === filter.attribute.id
+                );
+
+                if (!updatedAttribute || updatedAttribute === filter.attribute) {
+                    return filter;
+                }
+
+                changed = true;
+                return {
+                    ...filter,
+                    attribute: updatedAttribute,
+                };
+            });
+
+            return changed ? nextFilters : currentFilters;
+        });
+    }, [availableUsageFilterAttributes]);
+
     // Initial load - fetch when auth becomes available
     useEffect(() => {
         if (auth.isAuthenticated) {
@@ -297,22 +388,8 @@ export default function UsagePage() {
         router.push(`/workflow/${run.workflow_id}/run/${run.id}`);
     };
 
-    // Format datetime for display with timezone support
-    const formatDateTime = (dateString: string) => {
-        const date = new Date(dateString);
-        const tzValue = typeof selectedTimezone === 'string' ? selectedTimezone : selectedTimezone.value;
-        // Use local timezone if none selected (during loading)
-        const effectiveTz = tzValue || localTimezone;
-        return date.toLocaleString('en-US', {
-            timeZone: effectiveTz,
-            year: 'numeric',
-            month: 'short',
-            day: 'numeric',
-            hour: '2-digit',
-            minute: '2-digit',
-            hour12: true
-        });
-    };
+    const timezoneValue = typeof selectedTimezone === 'string' ? selectedTimezone : selectedTimezone.value;
+    const effectiveTimezone = timezoneValue || localTimezone;
 
     // Format duration for display
     const formatDuration = (seconds: number) => {
@@ -420,7 +497,7 @@ export default function UsagePage() {
                 {/* Filter Builder */}
                 <div className="mb-6 space-y-3">
                     <FilterBuilder
-                        availableAttributes={usageFilterAttributes}
+                        availableAttributes={availableUsageFilterAttributes}
                         activeFilters={activeFilters}
                         onFiltersChange={handleFiltersChange}
                         onApplyFilters={handleApplyFilters}
@@ -509,7 +586,7 @@ export default function UsagePage() {
                                                             <span className="text-sm text-muted-foreground">-</span>
                                                         )}
                                                     </TableCell>
-                                                    <TableCell>{formatDateTime(run.created_at)}</TableCell>
+                                                    <TableCell>{formatDateTime(run.created_at, effectiveTimezone)}</TableCell>
                                                     <TableCell className="text-right">
                                                         {formatDuration(run.call_duration_seconds)}
                                                     </TableCell>

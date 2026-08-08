@@ -9,6 +9,8 @@ import type {
     EndCallToolDefinition,
     HttpApiToolDefinition,
     McpToolDefinition,
+    PresetToolParameter,
+    ToolParameter,
     TransferCallConfig,
     TransferCallToolDefinition,
 } from "@/client/types.gen";
@@ -16,6 +18,39 @@ import type {
 export type ToolCategory = "http_api" | "end_call" | "transfer_call" | "calculator" | "native" | "integration" | "mcp";
 
 export type EndCallMessageType = "none" | "custom" | "audio";
+export type TransferDestinationSource = "static" | "dynamic" | "context_mapping";
+
+export interface ContextDestinationRoute {
+    context_value: string;
+    destination: string;
+}
+
+export interface ContextDestinationRouteRow extends ContextDestinationRoute {
+    id: string;
+}
+
+export interface ContextDestinationMappingConfig {
+    context_path: string;
+    routes: ContextDestinationRoute[];
+    fallback_destination?: string | null;
+}
+
+export interface TransferResolverConfig {
+    type: "http";
+    url: string;
+    headers?: Record<string, string> | null;
+    credential_uuid?: string | null;
+    timeout_ms: number;
+    wait_message?: string | null;
+    parameters?: ToolParameter[] | null;
+    preset_parameters?: PresetToolParameter[] | null;
+}
+
+export interface ExtendedTransferCallConfig extends TransferCallConfig {
+    destination_source?: TransferDestinationSource;
+    resolver?: TransferResolverConfig | null;
+    context_mapping?: ContextDestinationMappingConfig | null;
+}
 
 export interface ToolCategoryConfig {
     value: ToolCategory;
@@ -55,7 +90,7 @@ export const TOOL_CATEGORIES: ToolCategoryConfig[] = [
     {
         value: "transfer_call",
         label: "Transfer Call",
-        description: "Transfer the call to another phone number (Twilio only)",
+        description: "Transfer the call to another phone number (Twilio, Plivo)",
         icon: PhoneForwarded,
         iconName: "phone-forwarded",
         iconColor: "#10B981",

@@ -14,11 +14,18 @@ from pydantic import BaseModel
 
 from api.db import db_client
 from api.enums import TriggerState, WorkflowStatus
-from api.services.quota_service import check_dograh_quota_by_user_id
+from api.services.call_concurrency import (
+    CallConcurrencyLimitError,
+    call_concurrency,
+)
+from api.services.quota_service import authorize_workflow_run_start
 from api.services.telephony.factory import (
     get_default_telephony_provider,
     get_telephony_provider_by_id,
 )
+from api.services.workflow.initial_context import merge_external_initial_context
+from api.services.workflow.run_creation import prepare_workflow_run_inputs
+from api.services.workflow_run_failure import mark_workflow_run_failed
 from api.utils.common import get_backend_endpoints
 
 router = APIRouter(prefix="/public/agent")
@@ -179,14 +186,6 @@ async def _execute_resolved_target(
     """Shared execution path once the target workflow has been resolved."""
     execution_user_id = _get_execution_user_id(target.workflow)
 
-    # Check Dograh quota using the workflow owner's config and model overrides.
-    quota_result = await check_dograh_quota_by_user_id(
-        execution_user_id,
-        workflow_id=target.workflow.id,
-    )
-    if not quota_result.has_quota:
-        raise HTTPException(status_code=402, detail=quota_result.error_message)
-
     # Get telephony provider — either the caller-specified config (validated
     # against the workflow's org) or the org's default config.
     if request.telephony_configuration_id is not None:
@@ -249,17 +248,46 @@ async def _execute_resolved_target(
         initial_context["api_key_id"] = api_key_id
     if api_key_created_by is not None:
         initial_context["api_key_created_by"] = api_key_created_by
-    initial_context.update(request.initial_context or {})
-
-    workflow_run = await db_client.create_workflow_run(
-        name=workflow_run_name,
-        workflow_id=target.workflow.id,
-        mode=workflow_run_mode,
-        initial_context=initial_context,
-        user_id=execution_user_id,
-        use_draft=use_draft,
-        organization_id=target.organization_id,
+    initial_context = merge_external_initial_context(
+        initial_context, request.initial_context
     )
+    # The destination describes the actual call and must not be overridden by
+    # caller-supplied context.
+    initial_context["called_number"] = request.phone_number
+
+    try:
+        concurrency_slot = await call_concurrency.acquire_org_slot(
+            target.organization_id,
+            source="public_agent",
+            timeout=0,
+        )
+    except CallConcurrencyLimitError:
+        raise HTTPException(
+            status_code=429,
+            detail="Concurrent call limit reached",
+        )
+
+    try:
+        run_inputs = await prepare_workflow_run_inputs(
+            db_client,
+            target.workflow,
+            initial_context=initial_context,
+            use_draft=use_draft,
+            include_template_context=use_draft,
+        )
+        workflow_run = await db_client.create_workflow_run(
+            name=workflow_run_name,
+            workflow_id=target.workflow.id,
+            mode=workflow_run_mode,
+            initial_context=run_inputs.initial_context,
+            user_id=execution_user_id,
+            organization_id=target.organization_id,
+            definition_id=run_inputs.definition_id,
+        )
+        await call_concurrency.bind_workflow_run(concurrency_slot, workflow_run.id)
+    except Exception:
+        await call_concurrency.release_slot(concurrency_slot)
+        raise
 
     logger.info(
         f"Created workflow run {workflow_run.id} for public agent "
@@ -268,37 +296,80 @@ async def _execute_resolved_target(
         f"to phone number {request.phone_number}"
     )
 
+    # Check Dograh quota after the run exists so hosted v2 can mint and store
+    # the MPS correlation id before the provider starts the call.
+    quota_result = await authorize_workflow_run_start(
+        workflow_id=target.workflow.id,
+        organization_id=target.organization_id,
+        workflow_run_id=workflow_run.id,
+    )
+    if not quota_result.has_quota:
+        await mark_workflow_run_failed(
+            workflow_run.id, quota_result.error_message or "Quota exceeded"
+        )
+        await call_concurrency.release_workflow_run_slot(workflow_run.id)
+        raise HTTPException(status_code=402, detail=quota_result.error_message)
+
     # 9. Construct webhook URL for telephony provider callback
-    backend_endpoint, _ = await get_backend_endpoints()
+    try:
+        backend_endpoint, _ = await get_backend_endpoints()
+    except Exception:
+        await call_concurrency.release_workflow_run_slot(workflow_run.id)
+        raise
     webhook_endpoint = provider.WEBHOOK_ENDPOINT
 
     webhook_url = (
         f"{backend_endpoint}/api/v1/telephony/{webhook_endpoint}"
         f"?workflow_id={target.workflow.id}"
-        f"&user_id={execution_user_id}"
         f"&workflow_run_id={workflow_run.id}"
         f"&organization_id={target.organization_id}"
     )
 
-    # 10. Initiate call via telephony provider. workflow_id and user_id are
-    # required by providers that build the media WebSocket URL at dial time
+    # 10. Initiate call via telephony provider. workflow_id and organization_id
+    # are required by providers that build the media WebSocket URL at dial time
     # (e.g. Telnyx, Cloudonix); without them the URL contains "None/None" and
     # the stream connection fails.
     try:
-        await provider.initiate_call(
+        result = await provider.initiate_call(
             to_number=request.phone_number,
             webhook_url=webhook_url,
             workflow_run_id=workflow_run.id,
             workflow_id=target.workflow.id,
-            user_id=execution_user_id,
+            organization_id=target.organization_id,
         )
     except Exception as e:
         logger.warning(
             f"Failed to initiate call for workflow run {workflow_run.id}: {e}"
         )
+        await mark_workflow_run_failed(workflow_run.id, f"Failed to initiate call: {e}")
+        await call_concurrency.release_workflow_run_slot(workflow_run.id)
         raise HTTPException(
             status_code=400,
             detail=f"Failed to initiate call: {e}",
+        )
+
+    gathered_context = {
+        "provider": provider.PROVIDER_NAME,
+        "triggered_by": "api",
+        **(result.provider_metadata or {}),
+    }
+    if target.identifier_type == "trigger_path":
+        gathered_context["trigger_uuid"] = target.identifier_value
+
+    telephony_context = {"called_number": request.phone_number}
+    if result.caller_number:
+        telephony_context["caller_number"] = result.caller_number
+
+    try:
+        await db_client.update_workflow_run(
+            run_id=workflow_run.id,
+            gathered_context=gathered_context,
+            initial_context=telephony_context,
+        )
+    except Exception as e:
+        logger.warning(
+            f"Call initiated for workflow run {workflow_run.id}, but failed to "
+            f"persist call metadata and telephony context: {e}"
         )
 
     logger.info(

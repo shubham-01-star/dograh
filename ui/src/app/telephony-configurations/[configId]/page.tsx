@@ -1,11 +1,13 @@
 "use client";
 
 import {
+  AlertTriangle,
   ArrowLeft,
   Copy,
   ExternalLink,
   Pencil,
   Plus,
+  RotateCcw,
   Star,
   Trash2,
 } from "lucide-react";
@@ -18,6 +20,7 @@ import {
   deletePhoneNumberApiV1OrganizationsTelephonyConfigsConfigIdPhoneNumbersPhoneNumberIdDelete,
   getTelephonyConfigurationByIdApiV1OrganizationsTelephonyConfigsConfigIdGet,
   listPhoneNumbersApiV1OrganizationsTelephonyConfigsConfigIdPhoneNumbersGet,
+  reactivateTelephonyConfigurationApiV1OrganizationsTelephonyConfigsConfigIdReactivatePost,
   setDefaultCallerIdApiV1OrganizationsTelephonyConfigsConfigIdPhoneNumbersPhoneNumberIdSetDefaultCallerPost,
   setDefaultOutboundApiV1OrganizationsTelephonyConfigsConfigIdSetDefaultOutboundPost,
 } from "@/client/sdk.gen";
@@ -55,17 +58,16 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { useAppConfig } from "@/context/AppConfigContext";
+import { useOrgConfig } from "@/context/OrgConfigContext";
+import { useOrganizationTimezone } from "@/hooks/useOrganizationTimezone";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+import { copyTextToClipboard } from "@/lib/clipboard";
+import { formatDateTime } from "@/lib/dateTime";
+import { resolveWebhookBaseUrl } from "@/lib/webhookUrl";
 
 const INBOUND_WEBHOOK_PATH = "/api/v1/telephony/inbound/run";
-
-function getInboundWebhookUrl(): string {
-  const backendUrl =
-    process.env.NEXT_PUBLIC_BACKEND_URL ||
-    (typeof window !== "undefined" ? window.location.origin : "");
-  return `${backendUrl}${INBOUND_WEBHOOK_PATH}`;
-}
 
 export default function TelephonyConfigurationDetailPage() {
   const router = useRouter();
@@ -73,6 +75,10 @@ export default function TelephonyConfigurationDetailPage() {
   const configId = Number(params.configId);
 
   const { user, getAccessToken, loading: authLoading } = useAuth();
+  const { config: appConfig } = useAppConfig();
+  const { externalPbxIntegrationsEnabled } = useOrgConfig();
+  const organizationTimezone = useOrganizationTimezone();
+  const inboundWebhookUrl = `${resolveWebhookBaseUrl(appConfig?.tunnelUrl)}${INBOUND_WEBHOOK_PATH}`;
   const [config, setConfig] = useState<TelephonyConfigurationDetail | null>(null);
   const [phoneNumbers, setPhoneNumbers] = useState<PhoneNumberResponse[]>([]);
   const [loading, setLoading] = useState(true);
@@ -133,6 +139,26 @@ export default function TelephonyConfigurationDetailPage() {
       fetchAll();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Failed to set default");
+    }
+  };
+
+  const onReactivate = async () => {
+    if (!config) return;
+    try {
+      const token = await getAccessToken();
+      const res = await reactivateTelephonyConfigurationApiV1OrganizationsTelephonyConfigsConfigIdReactivatePost(
+        {
+          headers: { Authorization: `Bearer ${token}` },
+          path: { config_id: config.id },
+        },
+      );
+      if (res.error) throw new Error(detailFromError(res.error));
+      toast.success("Reactivated — reconnecting within a minute");
+      fetchAll();
+    } catch (err) {
+      toast.error(
+        err instanceof Error ? err.message : "Failed to reactivate configuration",
+      );
     }
   };
 
@@ -219,15 +245,15 @@ export default function TelephonyConfigurationDetailPage() {
                   Default
                 </Badge>
               )}
+              {config.inactive && <Badge variant="destructive">Inactive</Badge>}
             </div>
             <CardDescription>
-              Updated {new Date(config.updated_at).toLocaleString()}
+              Updated {formatDateTime(config.updated_at, organizationTimezone)}
             </CardDescription>
             <button
               type="button"
               onClick={() => {
-                navigator.clipboard
-                  .writeText(String(config.id))
+                copyTextToClipboard(String(config.id))
                   .then(() => toast.success("Configuration ID copied"))
                   .catch(() => toast.error("Failed to copy ID"));
               }}
@@ -239,6 +265,11 @@ export default function TelephonyConfigurationDetailPage() {
             </button>
           </div>
           <div className="flex items-center gap-2 shrink-0">
+            {config.inactive && (
+              <Button variant="outline" size="sm" onClick={onReactivate}>
+                <RotateCcw className="h-4 w-4 mr-2" /> Reactivate
+              </Button>
+            )}
             {!config.is_default_outbound && (
               <Button variant="outline" size="sm" onClick={onSetDefaultOutbound}>
                 <Star className="h-4 w-4 mr-2" /> Set as default
@@ -250,12 +281,39 @@ export default function TelephonyConfigurationDetailPage() {
           </div>
         </CardHeader>
         <CardContent className="space-y-4">
+          {config.inactive && (
+            <div className="rounded-md border border-destructive/40 bg-destructive/5 p-4">
+              <div className="flex items-start gap-3">
+                <AlertTriangle className="h-5 w-5 shrink-0 mt-0.5 text-destructive" />
+                <div className="space-y-1 text-sm">
+                  <p className="font-medium text-destructive">
+                    This configuration is disabled
+                  </p>
+                  <p className="text-muted-foreground">
+                    Dograh stopped reconnecting after repeated connection
+                    failures
+                    {config.inactive_reason ? `: ${config.inactive_reason}` : ""}.
+                    Calls will not work until it is reconnected. Correct the
+                    settings below, then choose Reactivate to try again.
+                  </p>
+                  {config.inactive_since && (
+                    <p className="text-muted-foreground">
+                      Disabled{" "}
+                      {formatDateTime(config.inactive_since, organizationTimezone)}
+                    </p>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
           <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
-            {Object.entries(config.credentials ?? {}).map(([k, v]) => (
+            {Object.entries(config.credentials ?? {})
+              .filter(([key]) => key !== "external_pbx" || externalPbxIntegrationsEnabled)
+              .map(([k, v]) => (
               <div key={k} className="flex justify-between gap-3">
                 <dt className="text-muted-foreground">{k}</dt>
                 <dd className="font-mono text-right truncate max-w-[60%]">
-                  {String(v ?? "")}
+                  {v && typeof v === "object" ? "Configured" : String(v ?? "")}
                 </dd>
               </div>
             ))}
@@ -265,9 +323,8 @@ export default function TelephonyConfigurationDetailPage() {
             <button
               type="button"
               onClick={() => {
-                const url = getInboundWebhookUrl();
-                navigator.clipboard
-                  .writeText(url)
+                const url = inboundWebhookUrl;
+                copyTextToClipboard(url)
                   .then(() => toast.success("Inbound webhook URL copied"))
                   .catch(() => toast.error("Failed to copy URL"));
               }}
@@ -275,7 +332,7 @@ export default function TelephonyConfigurationDetailPage() {
               aria-label="Copy inbound webhook URL"
               className="inline-flex items-center gap-1 self-start rounded font-mono text-xs text-muted-foreground hover:text-foreground"
             >
-              <span className="truncate">{getInboundWebhookUrl()}</span>
+              <span className="truncate">{inboundWebhookUrl}</span>
               <Copy className="h-3 w-3 shrink-0" />
             </button>
           </div>

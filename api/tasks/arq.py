@@ -3,7 +3,7 @@
 import ssl
 from urllib.parse import urlparse
 
-from api.constants import REDIS_URL
+from api.constants import REDIS_URL, TEXT_CHAT_INACTIVITY_SWEEP_INTERVAL_MINUTES
 
 # Setup logging - this is now idempotent and safe to call multiple times
 from api.logging_config import setup_logging
@@ -12,7 +12,7 @@ from api.tasks.function_names import FunctionNames
 setup_logging()
 
 # Now import ARQ and task dependencies
-from arq import create_pool
+from arq import create_pool, cron
 from arq.connections import ArqRedis, RedisSettings
 
 parsed_url = urlparse(REDIS_URL)
@@ -45,20 +45,42 @@ from api.tasks.campaign_tasks import (
 )
 from api.tasks.knowledge_base_processing import process_knowledge_base_document
 from api.tasks.run_integrations import run_integrations_post_workflow_run
-from api.tasks.s3_upload import upload_voicemail_audio_to_s3
+from api.tasks.text_chat_inactivity import (
+    complete_inactive_text_chat_session,
+    sweep_inactive_text_chat_sessions,
+)
+from api.tasks.webhook_delivery import deliver_webhook, sweep_webhook_deliveries
 from api.tasks.workflow_completion import process_workflow_completion
 
 
 class WorkerSettings:
     functions = [
         run_integrations_post_workflow_run,
-        upload_voicemail_audio_to_s3,
         process_workflow_completion,
         sync_campaign_source,
         process_campaign_batch,
         process_knowledge_base_document,
+        deliver_webhook,
+        complete_inactive_text_chat_session,
     ]
-    cron_jobs = []
+    cron_jobs = [
+        # Safety net for webhook deliveries whose ARQ job was lost (worker
+        # restart / Redis flush): re-enqueue any pending delivery that is overdue.
+        cron(
+            sweep_webhook_deliveries,
+            minute=set(range(0, 60, 5)),
+            second=0,
+            run_at_startup=True,
+        ),
+        # Text chats do not have a transport disconnect callback. Close stale
+        # sessions so their transcript and completion integrations are finalized.
+        cron(
+            sweep_inactive_text_chat_sessions,
+            minute=set(range(0, 60, TEXT_CHAT_INACTIVITY_SWEEP_INTERVAL_MINUTES)),
+            second=30,
+            run_at_startup=True,
+        ),
+    ]
     redis_settings = REDIS_SETTINGS
     max_jobs = 10
 
@@ -107,6 +129,8 @@ async def get_arq_redis() -> ArqRedis:
     return _redis_pool
 
 
-async def enqueue_job(function_name: FunctionNames, *args):
+async def enqueue_job(function_name: FunctionNames, *args, **kwargs):
     redis = await get_arq_redis()
-    await redis.enqueue_job(function_name, *args)
+    # kwargs forwards ARQ job options (e.g. _job_id, _defer_by) used for
+    # deterministic, backed-off webhook delivery retries.
+    return await redis.enqueue_job(function_name, *args, **kwargs)

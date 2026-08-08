@@ -1,7 +1,7 @@
 "use client";
 
 import { format } from "date-fns";
-import { ArrowLeft, BookA, Brain, CalendarIcon, Clipboard, Download, ExternalLink, FileDown, Fingerprint, Loader2, Mic, Pause, PhoneOff, Play, Rocket, Settings, Trash2Icon, Upload, Variable, X } from "lucide-react";
+import { ArrowLeft, BookA, Brain, CalendarIcon, Clipboard, Download, ExternalLink, FileDown, Fingerprint, Loader2, Mic, Pause, PhoneOff, Play, Plus, Rocket, Settings, Trash2Icon, Upload, Variable, X } from "lucide-react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -15,6 +15,7 @@ import {
     getWorkflowApiV1WorkflowFetchWorkflowIdGet,
 } from "@/client/sdk.gen";
 import type {
+    ModelConfigurationPricingResponse,
     OrganizationAiModelConfigurationResponse,
     OrganizationAiModelConfigurationV2,
     WorkflowResponse,
@@ -25,7 +26,6 @@ import {
 } from "@/components/AIModelConfigurationV2Editor";
 import { FlowEdge, FlowNode } from "@/components/flow/types";
 import { LLMConfigSelector } from "@/components/LLMConfigSelector";
-import { ServiceConfigurationForm } from "@/components/ServiceConfigurationForm";
 import SpinLoader from "@/components/SpinLoader";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -38,15 +38,23 @@ import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
 import { SETTINGS_DOCUMENTATION_URLS } from "@/constants/documentation";
+import { useOrgConfig } from "@/context/OrgConfigContext";
 import { UnsavedChangesProvider, useUnsavedChanges, useUnsavedChangesContext } from "@/context/UnsavedChangesContext";
 import { useAudioPlayback } from "@/hooks/useAudioPlayback";
 import { detailFromError } from "@/lib/apiError";
 import { useAuth } from "@/lib/auth";
+import { copyTextToClipboard } from "@/lib/clipboard";
 import logger from "@/lib/logger";
+import { fetchModelConfigurationPricing } from "@/lib/modelConfigurationPricing";
 import {
     type AmbientNoiseConfiguration,
+    DEFAULT_PROVISIONAL_VAD_PAUSE_SECS,
+    DEFAULT_TURN_START_MIN_WORDS,
     DEFAULT_VOICEMAIL_DETECTION_CONFIGURATION,
-    DEFAULT_WORKFLOW_CONFIGURATIONS,
+    type ExternalPBXFieldMapping,
+    resolveWorkflowConfigurations,
+    TURN_START_STRATEGY_OPTIONS,
+    type TurnStartStrategy,
     type TurnStopStrategy,
     type VoicemailDetectionConfiguration,
     type WorkflowConfigurations,
@@ -59,10 +67,7 @@ import { useWorkflowState } from "../hooks/useWorkflowState";
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_AMBIENT_NOISE_CONFIG: AmbientNoiseConfiguration = {
-    enabled: false,
-    volume: 0.3,
-};
+const PUBLISH_WORKFLOW_REMINDER = "Publish the agent to apply the changes.";
 
 const DEFAULT_VOICEMAIL_SYSTEM_PROMPT = `You are a voicemail detection classifier for an OUTBOUND calling system. A bot has called a phone number and you need to determine if a human answered or if the call went to voicemail based on the provided text.
 
@@ -273,37 +278,68 @@ function GeneralSection({
     workflowId: number;
     onSave: (configurations: WorkflowConfigurations, workflowName: string) => Promise<void>;
 }) {
+    const { externalPbxIntegrationsEnabled } = useOrgConfig();
     const [name, setName] = useState(workflowName);
     const [ambientNoiseConfig, setAmbientNoiseConfig] = useState<AmbientNoiseConfiguration>(
-        workflowConfigurations.ambient_noise_configuration || DEFAULT_AMBIENT_NOISE_CONFIG,
+        workflowConfigurations.ambient_noise_configuration,
     );
-    const [maxCallDuration, setMaxCallDuration] = useState(workflowConfigurations.max_call_duration || 600);
-    const [maxUserIdleTimeout, setMaxUserIdleTimeout] = useState(workflowConfigurations.max_user_idle_timeout || 10);
-    const [smartTurnStopSecs, setSmartTurnStopSecs] = useState(workflowConfigurations.smart_turn_stop_secs || 2);
+    const [maxCallDuration, setMaxCallDuration] = useState(workflowConfigurations.max_call_duration);
+    const [maxUserIdleTimeout, setMaxUserIdleTimeout] = useState(workflowConfigurations.max_user_idle_timeout);
+    const [smartTurnStopSecs, setSmartTurnStopSecs] = useState(workflowConfigurations.smart_turn_stop_secs);
+    const [turnStartStrategy, setTurnStartStrategy] = useState<TurnStartStrategy>(
+        workflowConfigurations.turn_start_strategy,
+    );
+    const [turnStartMinWords, setTurnStartMinWords] = useState(
+        workflowConfigurations.turn_start_min_words,
+    );
+    const [provisionalVadPauseSecs, setProvisionalVadPauseSecs] = useState(
+        workflowConfigurations.provisional_vad_pause_secs,
+    );
     const [turnStopStrategy, setTurnStopStrategy] = useState<TurnStopStrategy>(
-        workflowConfigurations.turn_stop_strategy || "transcription",
+        workflowConfigurations.turn_stop_strategy,
     );
     const [contextCompactionEnabled, setContextCompactionEnabled] = useState(
-        workflowConfigurations.context_compaction_enabled ?? false,
+        workflowConfigurations.context_compaction_enabled,
+    );
+    const [includeTranscriptEndTimestamps, setIncludeTranscriptEndTimestamps] = useState(
+        workflowConfigurations.transcript_configuration?.include_end_timestamps ?? false,
+    );
+    const [externalPbxFieldMappings, setExternalPbxFieldMappings] = useState<ExternalPBXFieldMapping[]>(
+        workflowConfigurations.external_pbx_field_mappings,
     );
     const [isSaving, setIsSaving] = useState(false);
     const [isUploadingAudio, setIsUploadingAudio] = useState(false);
     const [audioUploadError, setAudioUploadError] = useState<string | null>(null);
     const ambientFileInputRef = useRef<HTMLInputElement>(null);
     const { playingId, toggle: togglePlayback } = useAudioPlayback();
+    const selectedTurnStartStrategy = TURN_START_STRATEGY_OPTIONS.find(
+        (option) => option.value === turnStartStrategy,
+    );
+    const externalPbxFieldMappingsValid = externalPbxFieldMappings.every(
+        (mapping) =>
+            Boolean(mapping.context_path.trim()) &&
+            /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(mapping.destination_field.trim()),
+    );
 
     const isDirty = useMemo(() => {
-        const initAmbient = workflowConfigurations.ambient_noise_configuration || DEFAULT_AMBIENT_NOISE_CONFIG;
+        const initAmbient = workflowConfigurations.ambient_noise_configuration;
         return (
             name !== workflowName ||
             JSON.stringify(ambientNoiseConfig) !== JSON.stringify(initAmbient) ||
-            maxCallDuration !== (workflowConfigurations.max_call_duration || 600) ||
-            maxUserIdleTimeout !== (workflowConfigurations.max_user_idle_timeout || 10) ||
-            smartTurnStopSecs !== (workflowConfigurations.smart_turn_stop_secs || 2) ||
-            turnStopStrategy !== (workflowConfigurations.turn_stop_strategy || "transcription") ||
-            contextCompactionEnabled !== (workflowConfigurations.context_compaction_enabled ?? false)
+            maxCallDuration !== workflowConfigurations.max_call_duration ||
+            maxUserIdleTimeout !== workflowConfigurations.max_user_idle_timeout ||
+            smartTurnStopSecs !== workflowConfigurations.smart_turn_stop_secs ||
+            turnStartStrategy !== workflowConfigurations.turn_start_strategy ||
+            turnStartMinWords !== workflowConfigurations.turn_start_min_words ||
+            provisionalVadPauseSecs !== workflowConfigurations.provisional_vad_pause_secs ||
+            turnStopStrategy !== workflowConfigurations.turn_stop_strategy ||
+            contextCompactionEnabled !== workflowConfigurations.context_compaction_enabled ||
+            includeTranscriptEndTimestamps !==
+            (workflowConfigurations.transcript_configuration?.include_end_timestamps ?? false) ||
+            JSON.stringify(externalPbxFieldMappings) !==
+            JSON.stringify(workflowConfigurations.external_pbx_field_mappings)
         );
-    }, [name, workflowName, ambientNoiseConfig, maxCallDuration, maxUserIdleTimeout, smartTurnStopSecs, turnStopStrategy, contextCompactionEnabled, workflowConfigurations]);
+    }, [name, workflowName, ambientNoiseConfig, maxCallDuration, maxUserIdleTimeout, smartTurnStopSecs, turnStartStrategy, turnStartMinWords, provisionalVadPauseSecs, turnStopStrategy, contextCompactionEnabled, includeTranscriptEndTimestamps, externalPbxFieldMappings, workflowConfigurations]);
 
     useUnsavedChanges("general", isDirty);
 
@@ -375,11 +411,20 @@ function GeneralSection({
                     max_call_duration: maxCallDuration,
                     max_user_idle_timeout: maxUserIdleTimeout,
                     smart_turn_stop_secs: smartTurnStopSecs,
+                    turn_start_strategy: turnStartStrategy,
+                    turn_start_min_words: turnStartMinWords,
+                    provisional_vad_pause_secs: provisionalVadPauseSecs,
                     turn_stop_strategy: turnStopStrategy,
                     context_compaction_enabled: contextCompactionEnabled,
+                    transcript_configuration: {
+                        ...(workflowConfigurations.transcript_configuration ?? {}),
+                        include_end_timestamps: includeTranscriptEndTimestamps,
+                    },
+                    external_pbx_field_mappings: externalPbxFieldMappings,
                 },
                 name,
             );
+            toast.success(`General settings saved. ${PUBLISH_WORKFLOW_REMINDER}`);
         } catch (error) {
             console.error("Failed to save general settings:", error);
         } finally {
@@ -593,12 +638,122 @@ function GeneralSection({
 
                 <Separator />
 
+                {/* Interruption */}
+                <div className="space-y-4">
+                    <div>
+                        <h3 className="text-sm font-medium">Interruption</h3>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                            Configure when user speech should interrupt the agent while it is speaking.
+                        </p>
+                    </div>
+                    <div className="space-y-2">
+                        <Label htmlFor="turn_start_strategy" className="text-xs">Interruption Strategy</Label>
+                        <Select
+                            value={turnStartStrategy}
+                            onValueChange={(value: TurnStartStrategy) => setTurnStartStrategy(value)}
+                        >
+                            <SelectTrigger id="turn_start_strategy">
+                                <SelectValue placeholder="Select strategy" />
+                            </SelectTrigger>
+                            <SelectContent>
+                                {TURN_START_STRATEGY_OPTIONS.map((option) => (
+                                    <SelectItem key={option.value} value={option.value}>
+                                        {option.label}
+                                    </SelectItem>
+                                ))}
+                            </SelectContent>
+                        </Select>
+                        <p className="text-xs text-muted-foreground">
+                            {selectedTurnStartStrategy?.description}
+                            {turnStartStrategy === "provisional_vad" && (
+                                <span className="ml-2 inline-flex rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                                    Experimental
+                                </span>
+                            )}
+                        </p>
+                    </div>
+                    {turnStartStrategy === "min_words" && (
+                        <div className="space-y-2">
+                            <Label htmlFor="turn_start_min_words" className="text-xs">
+                                Minimum Words Before Interruption
+                            </Label>
+                            <Input
+                                id="turn_start_min_words"
+                                type="number"
+                                step="1"
+                                min="1"
+                                max="10"
+                                value={turnStartMinWords}
+                                onChange={(e) => {
+                                    const value = parseInt(e.target.value);
+                                    if (!isNaN(value) && value >= 1) setTurnStartMinWords(value);
+                                }}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                                Number of transcribed words needed to interrupt while the bot is speaking. Default: {DEFAULT_TURN_START_MIN_WORDS}
+                            </p>
+                        </div>
+                    )}
+                    {turnStartStrategy === "provisional_vad" && (
+                        <div className="space-y-2">
+                            <Label htmlFor="provisional_vad_pause_secs" className="text-xs">
+                                Provisional Pause (seconds)
+                            </Label>
+                            <Input
+                                id="provisional_vad_pause_secs"
+                                type="number"
+                                step="0.1"
+                                min="0.1"
+                                max="5"
+                                value={provisionalVadPauseSecs}
+                                onChange={(e) => {
+                                    const value = parseFloat(e.target.value);
+                                    if (!isNaN(value) && value >= 0.1) setProvisionalVadPauseSecs(value);
+                                }}
+                            />
+                            <p className="text-xs text-muted-foreground">
+                                Seconds to pause bot audio while waiting for transcript confirmation. Default: {DEFAULT_PROVISIONAL_VAD_PAUSE_SECS}
+                            </p>
+                        </div>
+                    )}
+                </div>
+
+                <Separator />
+
+                {/* Transcript */}
+                <div className="space-y-4">
+                    <div>
+                        <h3 className="text-sm font-medium">Transcript</h3>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                            Include start and stop timestamps for each speaker in the uploaded transcript.
+                        </p>
+                    </div>
+                    <div className="flex items-center justify-between">
+                        <Label htmlFor="transcript-end-timestamps-enabled" className="text-sm">
+                            Enhanced Timestamped Transcript
+                        </Label>
+                        <Switch
+                            id="transcript-end-timestamps-enabled"
+                            checked={includeTranscriptEndTimestamps}
+                            onCheckedChange={setIncludeTranscriptEndTimestamps}
+                        />
+                    </div>
+                    <div className="rounded-md border bg-muted/20 p-3">
+                        <pre className="whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">
+                            {`[2026-07-06T10:00:00.000Z -> 2026-07-06T10:00:04.800Z] assistant: Can you confirm your date of birth?
+[2026-07-06T10:00:06.200Z -> 2026-07-06T10:00:08.700Z] user: January fifth, nineteen ninety.`}
+                        </pre>
+                    </div>
+                </div>
+
+                <Separator />
+
                 {/* Context Compaction */}
                 <div className="space-y-4">
                     <div>
                         <h3 className="text-sm font-medium">Context Compaction</h3>
                         <p className="text-xs text-muted-foreground mt-0.5">
-                            Automatically summarize conversation context when transitioning between nodes. Not applicable in Realtime mode — the speech-to-speech service manages its own conversation state and this setting is ignored.
+                            Automatically summarize conversation context when transitioning between nodes. Not applicable in Realtime mode - the speech-to-speech service manages its own conversation state and this setting is ignored.
                         </p>
                     </div>
                     <div className="flex items-center justify-between">
@@ -656,10 +811,94 @@ function GeneralSection({
                         </div>
                     </div>
                 </div>
+
+                {externalPbxIntegrationsEnabled && (
+                    <>
+                        <Separator />
+
+                        {/* External PBX Field Updates */}
+                        <div className="space-y-4">
+                            <div>
+                                <h3 className="text-sm font-medium">External PBX Field Updates</h3>
+                                <p className="text-xs text-muted-foreground mt-0.5">
+                                    Optionally copy final gathered-context values into provider-native fields before transfer or hangup.
+                                </p>
+                            </div>
+                            <div className="flex items-center justify-between">
+                                <Label className="text-sm">Field Mappings</Label>
+                                <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    onClick={() => setExternalPbxFieldMappings((current) => [
+                                        ...current,
+                                        { context_path: "", destination_field: "" },
+                                    ])}
+                                >
+                                    <Plus className="mr-1 h-4 w-4" /> Add mapping
+                                </Button>
+                            </div>
+                            <div className="space-y-2">
+                                {externalPbxFieldMappings.map((mapping, index) => (
+                                    <div key={index} className="grid grid-cols-[1fr_1fr_auto] gap-2">
+                                        <Input
+                                            aria-label={`Gathered context field ${index + 1}`}
+                                            value={mapping.context_path}
+                                            onChange={(event) => setExternalPbxFieldMappings((current) =>
+                                                current.map((item, itemIndex) =>
+                                                    itemIndex === index
+                                                        ? { ...item, context_path: event.target.value }
+                                                        : item,
+                                                )
+                                            )}
+                                            placeholder="qualified"
+                                        />
+                                        <Input
+                                            aria-label={`External PBX destination field ${index + 1}`}
+                                            value={mapping.destination_field}
+                                            onChange={(event) => setExternalPbxFieldMappings((current) =>
+                                                current.map((item, itemIndex) =>
+                                                    itemIndex === index
+                                                        ? { ...item, destination_field: event.target.value }
+                                                        : item,
+                                                )
+                                            )}
+                                            placeholder="address3"
+                                        />
+                                        <Button
+                                            type="button"
+                                            variant="ghost"
+                                            size="icon"
+                                            aria-label={`Remove external PBX field mapping ${index + 1}`}
+                                            onClick={() => setExternalPbxFieldMappings((current) =>
+                                                current.filter((_, itemIndex) => itemIndex !== index)
+                                            )}
+                                        >
+                                            <Trash2Icon className="h-4 w-4" />
+                                        </Button>
+                                    </div>
+                                ))}
+                                {externalPbxFieldMappings.length === 0 && (
+                                    <p className="text-xs text-muted-foreground">
+                                        No external fields will be updated. Context names may be direct extracted-variable names or paths such as extracted_variables.qualified.
+                                    </p>
+                                )}
+                                {!externalPbxFieldMappingsValid && (
+                                    <p className="text-xs text-destructive">
+                                        Each mapping needs a context field and a destination field containing only letters, numbers, and underscores.
+                                    </p>
+                                )}
+                            </div>
+                        </div>
+                    </>
+                )}
             </CardContent>
             <CardFooter className="justify-end gap-3 border-t pt-6">
                 {isDirty && <span className="text-xs text-muted-foreground">Unsaved changes</span>}
-                <Button onClick={handleSave} disabled={isSaving || !isDirty}>
+                <Button
+                    onClick={handleSave}
+                    disabled={isSaving || !isDirty || (externalPbxIntegrationsEnabled && !externalPbxFieldMappingsValid)}
+                >
                     {isSaving ? "Saving..." : "Save General Settings"}
                 </Button>
             </CardFooter>
@@ -714,6 +953,7 @@ function TemplateVariablesSection({
                 varsToSave = { ...varsToSave, [newKey]: newValue };
             }
             await onSave(varsToSave);
+            toast.success(`Template variables saved. ${PUBLISH_WORKFLOW_REMINDER}`);
         } catch (error) {
             console.error("Failed to save variables:", error);
         } finally {
@@ -812,6 +1052,7 @@ function DictionarySection({
         setIsSaving(true);
         try {
             await onSave(dictionaryValue);
+            toast.success(`Dictionary saved. ${PUBLISH_WORKFLOW_REMINDER}`);
         } catch (error) {
             console.error("Failed to save dictionary:", error);
         } finally {
@@ -912,6 +1153,7 @@ function VoicemailSection({
                 { ...workflowConfigurations, voicemail_detection: voicemailConfig },
                 workflowName,
             );
+            toast.success(`Voicemail settings saved. ${PUBLISH_WORKFLOW_REMINDER}`);
         } catch (error) {
             console.error("Failed to save voicemail settings:", error);
         } finally {
@@ -1015,7 +1257,7 @@ function VoicemailSection({
 function AgentUuidSection({ workflowUuid }: { workflowUuid: string }) {
     const handleCopy = async () => {
         try {
-            await navigator.clipboard.writeText(workflowUuid);
+            await copyTextToClipboard(workflowUuid);
             toast.success("Agent UUID copied");
         } catch {
             toast.error("Failed to copy Agent UUID");
@@ -1072,6 +1314,7 @@ function WorkflowModelOverridesSection({
     onSave,
     modelConfigurationDefaults,
     organizationModelConfiguration,
+    modelConfigurationPricing,
     modelConfigurationLoading,
     modelConfigurationError,
 }: {
@@ -1080,6 +1323,7 @@ function WorkflowModelOverridesSection({
     onSave: (configurations: WorkflowConfigurations, workflowName: string) => Promise<void>;
     modelConfigurationDefaults: ModelConfigurationDefaultsV2 | null;
     organizationModelConfiguration: OrganizationAiModelConfigurationResponse | null;
+    modelConfigurationPricing: ModelConfigurationPricingResponse | null;
     modelConfigurationLoading: boolean;
     modelConfigurationError: string | null;
 }) {
@@ -1092,23 +1336,13 @@ function WorkflowModelOverridesSection({
         setOverrideEnabled(Boolean(workflowConfigurations.model_configuration_v2_override));
     }, [workflowConfigurations.model_configuration_v2_override]);
 
-    const source = organizationModelConfiguration?.source || "empty";
-    const isV2 = source === "organization_v2";
-
-    const saveLegacyOverrides = async (config: Record<string, unknown>) => {
-        const nextConfigurations = withoutModelConfigurationOverrides(workflowConfigurations);
-        const modelOverrides = config.model_overrides as WorkflowConfigurations["model_overrides"] | undefined;
-        if (modelOverrides) {
-            nextConfigurations.model_overrides = modelOverrides;
-        }
-        await onSave(nextConfigurations, workflowName);
-    };
+    const hasOrgConfiguration = organizationModelConfiguration?.source === "organization_v2";
 
     const saveV2Override = async (configuration: OrganizationAiModelConfigurationV2) => {
         const nextConfigurations = withoutModelConfigurationOverrides(workflowConfigurations);
         nextConfigurations.model_configuration_v2_override = configuration;
         await onSave(nextConfigurations, workflowName);
-        toast.success("Model override saved");
+        toast.success(`Model override saved. ${PUBLISH_WORKFLOW_REMINDER}`);
     };
 
     const removeV2Override = async () => {
@@ -1116,7 +1350,7 @@ function WorkflowModelOverridesSection({
         try {
             await onSave(withoutModelConfigurationOverrides(workflowConfigurations), workflowName);
             setOverrideEnabled(false);
-            toast.success("Using organization model configuration");
+            toast.success(`Organization model configuration saved. ${PUBLISH_WORKFLOW_REMINDER}`);
         } finally {
             setIsRemovingOverride(false);
         }
@@ -1130,9 +1364,7 @@ function WorkflowModelOverridesSection({
                     Model Overrides
                 </CardTitle>
                 <CardDescription>
-                    {isV2
-                        ? "Override the full organization model configuration for this workflow."
-                        : "Override global model settings for this workflow. Toggle individual services to customize."}{" "}
+                    Override the full organization model configuration for this workflow.{" "}
                     <a href={SETTINGS_DOCUMENTATION_URLS.modelOverrides} target="_blank" rel="noopener noreferrer" className="inline-flex items-center gap-0.5 underline">Learn more <ExternalLink className="h-3 w-3" /></a>
                 </CardDescription>
             </CardHeader>
@@ -1150,28 +1382,18 @@ function WorkflowModelOverridesSection({
                     </div>
                 )}
 
-                {!modelConfigurationLoading && !modelConfigurationError && !isV2 && (
-                    <>
-                        {source === "legacy_user_v1" && (
-                            <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-4 sm:flex-row sm:items-center sm:justify-between">
-                                <p className="text-sm text-muted-foreground">
-                                    This workflow is using legacy model overrides. Migrate organization model configuration to use v2 overrides.
-                                </p>
-                                <Button type="button" variant="outline" size="sm" asChild>
-                                    <Link href="/model-configurations?action=migrate_to_v2">Migrate to v2</Link>
-                                </Button>
-                            </div>
-                        )}
-                        <ServiceConfigurationForm
-                            mode="override"
-                            currentOverrides={workflowConfigurations.model_overrides}
-                            submitLabel="Save Model Overrides"
-                            onSave={saveLegacyOverrides}
-                        />
-                    </>
+                {!modelConfigurationLoading && !modelConfigurationError && !hasOrgConfiguration && (
+                    <div className="flex flex-col gap-3 rounded-md border bg-muted/30 p-4 sm:flex-row sm:items-center sm:justify-between">
+                        <p className="text-sm text-muted-foreground">
+                            Set up your organization model configuration before overriding it per workflow.
+                        </p>
+                        <Button type="button" variant="outline" size="sm" asChild>
+                            <Link href="/model-configurations">Configure Models</Link>
+                        </Button>
+                    </div>
                 )}
 
-                {!modelConfigurationLoading && !modelConfigurationError && isV2 && modelConfigurationDefaults && organizationModelConfiguration && (
+                {!modelConfigurationLoading && !modelConfigurationError && hasOrgConfiguration && modelConfigurationDefaults && organizationModelConfiguration && (
                     <>
                         <div className="flex items-center justify-between rounded-md border p-4">
                             <div className="space-y-0.5">
@@ -1203,6 +1425,7 @@ function WorkflowModelOverridesSection({
                                         ? null
                                         : organizationModelConfiguration.effective_configuration
                                 }
+                                pricing={modelConfigurationPricing}
                                 submitLabel="Save Model Override"
                                 onSave={saveV2Override}
                             />
@@ -1214,7 +1437,6 @@ function WorkflowModelOverridesSection({
                                 {hasSavedModelOverride && (
                                     <Button
                                         type="button"
-                                        variant="outline"
                                         className="mt-3"
                                         onClick={removeV2Override}
                                         disabled={isRemovingOverride}
@@ -1320,6 +1542,7 @@ function WorkflowSettingsInner({
     const [activeSection, setActiveSection] = useState("general");
     const [modelConfigurationDefaults, setModelConfigurationDefaults] = useState<ModelConfigurationDefaultsV2 | null>(null);
     const [organizationModelConfiguration, setOrganizationModelConfiguration] = useState<OrganizationAiModelConfigurationResponse | null>(null);
+    const [modelConfigurationPricing, setModelConfigurationPricing] = useState<ModelConfigurationPricingResponse | null>(null);
     const [modelConfigurationLoading, setModelConfigurationLoading] = useState(true);
     const [modelConfigurationError, setModelConfigurationError] = useState<string | null>(null);
     const hasFetchedModelConfiguration = useRef(false);
@@ -1341,13 +1564,18 @@ function WorkflowSettingsInner({
     );
 
     const initialWorkflowConfigurations = useMemo(
-        () => (workflow.workflow_configurations as WorkflowConfigurations) || DEFAULT_WORKFLOW_CONFIGURATIONS,
+        () => (
+            workflow.workflow_configurations
+                ? (workflow.workflow_configurations as WorkflowConfigurations)
+                : undefined
+        ),
         [workflow],
     );
 
     const {
         workflowName,
         workflowConfigurations,
+        textChatInactivityTimeoutConstraints,
         templateContextVariables,
         dictionary,
         saveWorkflowConfigurations,
@@ -1361,6 +1589,9 @@ function WorkflowSettingsInner({
         initialWorkflowConfigurations,
         user,
     });
+    const resolvedWorkflowConfigurationsForRender = workflowConfigurations
+        ? resolveWorkflowConfigurations(workflowConfigurations)
+        : null;
 
     useEffect(() => {
         if (hasFetchedModelConfiguration.current) return;
@@ -1369,9 +1600,10 @@ function WorkflowSettingsInner({
         const loadModelConfiguration = async () => {
             setModelConfigurationLoading(true);
             setModelConfigurationError(null);
-            const [defaultsResult, configurationResult] = await Promise.all([
+            const [defaultsResult, configurationResult, pricingResult] = await Promise.all([
                 getModelConfigurationV2DefaultsApiV1OrganizationsModelConfigurationsV2DefaultsGet(),
                 getModelConfigurationV2ApiV1OrganizationsModelConfigurationsV2Get(),
+                fetchModelConfigurationPricing(),
             ]);
 
             if (defaultsResult.error) {
@@ -1387,6 +1619,7 @@ function WorkflowSettingsInner({
 
             setModelConfigurationDefaults(defaultsResult.data as ModelConfigurationDefaultsV2);
             setOrganizationModelConfiguration(configurationResult.data || null);
+            setModelConfigurationPricing(pricingResult);
             setModelConfigurationLoading(false);
         };
 
@@ -1435,22 +1668,23 @@ function WorkflowSettingsInner({
             <div className="mx-auto flex max-w-5xl gap-8 px-6 py-8">
                 {/* Sections */}
                 <div className="min-w-0 flex-1 space-y-8">
-                    {workflowConfigurations && (
+                    {resolvedWorkflowConfigurationsForRender && (
                         <>
                             {/* General */}
                             <GeneralSection
-                                workflowConfigurations={workflowConfigurations}
+                                workflowConfigurations={resolvedWorkflowConfigurationsForRender}
                                 workflowName={workflowName || workflow.name}
                                 workflowId={workflowId}
                                 onSave={saveWorkflowConfigurations}
                             />
 
                             <WorkflowModelOverridesSection
-                                workflowConfigurations={workflowConfigurations}
+                                workflowConfigurations={resolvedWorkflowConfigurationsForRender}
                                 workflowName={workflowName}
                                 onSave={saveWorkflowConfigurations}
                                 modelConfigurationDefaults={modelConfigurationDefaults}
                                 organizationModelConfiguration={organizationModelConfiguration}
+                                modelConfigurationPricing={modelConfigurationPricing}
                                 modelConfigurationLoading={modelConfigurationLoading}
                                 modelConfigurationError={modelConfigurationError}
                             />
@@ -1466,7 +1700,7 @@ function WorkflowSettingsInner({
 
                             {/* Voicemail Detection */}
                             <VoicemailSection
-                                workflowConfigurations={workflowConfigurations}
+                                workflowConfigurations={resolvedWorkflowConfigurationsForRender}
                                 workflowName={workflowName}
                                 onSave={saveWorkflowConfigurations}
                             />
@@ -1551,12 +1785,17 @@ function WorkflowSettingsInner({
             </div>
 
             {/* Dialogs for complex sections */}
-            <EmbedDialog
-                open={isEmbedDialogOpen}
-                onOpenChange={setIsEmbedDialogOpen}
-                workflowId={workflowId}
-                workflowName={workflowName || workflow.name}
-            />
+            {resolvedWorkflowConfigurationsForRender && (
+                <EmbedDialog
+                    open={isEmbedDialogOpen}
+                    onOpenChange={setIsEmbedDialogOpen}
+                    workflowId={workflowId}
+                    workflowName={workflowName || workflow.name}
+                    workflowConfigurations={resolvedWorkflowConfigurationsForRender}
+                    textChatInactivityTimeoutConstraints={textChatInactivityTimeoutConstraints}
+                    onSaveWorkflowConfigurations={saveWorkflowConfigurations}
+                />
+            )}
         </div>
     );
 }

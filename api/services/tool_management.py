@@ -20,6 +20,7 @@ from api.schemas.tool import (
     McpRefreshResponse,
     ToolResponse,
 )
+from api.services.organization_preferences import external_pbx_integrations_enabled
 from api.services.posthog_client import capture_event
 from api.services.workflow.mcp_tool_session import discover_mcp_tools
 from api.services.workflow.tools.mcp_tool import (
@@ -71,6 +72,23 @@ def _credential_uuid_from_definition(definition: dict[str, Any]) -> Optional[str
     return credential_uuid if isinstance(credential_uuid, str) else None
 
 
+def _credential_uuids_from_definition(definition: dict[str, Any]) -> list[str]:
+    credential_uuids: list[str] = []
+    top_level = _credential_uuid_from_definition(definition)
+    if top_level:
+        credential_uuids.append(top_level)
+
+    config = definition.get("config")
+    if isinstance(config, dict):
+        resolver = config.get("resolver")
+        if isinstance(resolver, dict):
+            resolver_credential_uuid = resolver.get("credential_uuid")
+            if isinstance(resolver_credential_uuid, str) and resolver_credential_uuid:
+                credential_uuids.append(resolver_credential_uuid)
+
+    return list(dict.fromkeys(credential_uuids))
+
+
 async def fetch_credential(credential_uuid: Optional[str], organization_id: int):
     """Best-effort credential lookup for MCP auth/discovery."""
     if not credential_uuid:
@@ -86,22 +104,55 @@ async def validate_tool_credential_references(
     definition: dict[str, Any], *, organization_id: int
 ) -> None:
     """Ensure credential UUID references belong to the caller's organization."""
-    credential_uuid = _credential_uuid_from_definition(definition)
-    if not credential_uuid:
-        return
-
-    credential = await db_client.get_credential_by_uuid(
-        credential_uuid, organization_id
-    )
-    if not credential:
-        raise ToolManagementError(
-            "credential_not_found",
-            (
-                f"Credential '{credential_uuid}' was not found in this organization. "
-                "Create it in the UI first, then retry with its credential_uuid."
-            ),
-            status_code=404,
+    for credential_uuid in _credential_uuids_from_definition(definition):
+        credential = await db_client.get_credential_by_uuid(
+            credential_uuid, organization_id
         )
+        if not credential:
+            raise ToolManagementError(
+                "credential_not_found",
+                (
+                    f"Credential '{credential_uuid}' was not found in this "
+                    "organization. Create it in the UI first, then retry with its "
+                    "credential_uuid."
+                ),
+                status_code=404,
+            )
+
+
+async def validate_external_pbx_tool_definition(
+    definition: dict[str, Any],
+    *,
+    organization_id: int,
+    existing_definition: Optional[dict[str, Any]] = None,
+) -> None:
+    """Enforce the org feature gate for context-to-in-group routing."""
+
+    config = definition.get("config")
+    existing_config = (existing_definition or {}).get("config")
+    uses_external_pbx = (
+        isinstance(config, dict)
+        and config.get("destination_source") == "context_mapping"
+    )
+    existing_uses_external_pbx = (
+        isinstance(existing_config, dict)
+        and existing_config.get("destination_source") == "context_mapping"
+    )
+    if not uses_external_pbx and not existing_uses_external_pbx:
+        return
+    if await external_pbx_integrations_enabled(organization_id):
+        return
+    if isinstance(existing_config, dict) and existing_config == config:
+        # Preserve a hidden existing mapping while the feature is disabled.
+        return
+    raise ToolManagementError(
+        "external_pbx_feature_disabled",
+        (
+            "External PBX integrations are disabled for this organization. "
+            "Enable them in Platform Settings before configuring in-group routing."
+        ),
+        status_code=403,
+    )
 
 
 async def populate_discovered_tools(
@@ -153,6 +204,9 @@ async def create_tool_for_user(
         )
 
     definition = request.definition.model_dump()
+    await validate_external_pbx_tool_definition(
+        definition, organization_id=user.selected_organization_id
+    )
     await validate_tool_credential_references(
         definition, organization_id=user.selected_organization_id
     )

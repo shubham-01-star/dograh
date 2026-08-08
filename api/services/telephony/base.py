@@ -4,6 +4,7 @@ This allows easy switching between different providers (Twilio, Vonage, etc.)
 while keeping business logic decoupled from specific implementations.
 """
 
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
@@ -40,6 +41,17 @@ class ProviderSyncResult:
     message: Optional[str] = None  # human-readable detail when ok=False
 
 
+class ProviderPhoneNumberLookupError(Exception):
+    """The provider could not determine whether it owns a phone number.
+
+    This is distinct from a successful lookup that reports ``ok=False``. The
+    latter means the address is definitely absent from the provider account;
+    this exception means credentials, transport, or the upstream API failed,
+    so callers should surface a provider error instead of treating the number
+    as unowned.
+    """
+
+
 @dataclass
 class NormalizedInboundData:
     """Standardized inbound call data across all providers."""
@@ -56,6 +68,15 @@ class NormalizedInboundData:
     raw_data: Dict[str, Any] = field(default_factory=dict)  # Original webhook data
 
 
+@dataclass
+class AnsweringMachineDetectionResult:
+    """Standardized answering-machine detection result across providers."""
+
+    call_id: str
+    answered_by: str
+    raw_data: Dict[str, Any] = field(default_factory=dict)
+
+
 class TelephonyProvider(ABC):
     """
     Abstract base class for telephony providers.
@@ -64,6 +85,28 @@ class TelephonyProvider(ABC):
 
     PROVIDER_NAME = None
     WEBHOOK_ENDPOINT = None
+
+    # Populated by provider constructors from the factory-normalized config.
+    from_numbers: List[str] = []
+    default_from_number: Optional[str] = None
+
+    def select_from_number(self, from_number: Optional[str] = None) -> Optional[str]:
+        """Resolve the caller ID for a one-off outbound call.
+
+        Preference order: explicit ``from_number`` > the configuration's
+        default caller ID > random pick from the pool. Callers that want
+        rotation across the pool (e.g. the campaign dispatcher) must pass an
+        explicit ``from_number`` — the default caller ID only applies when no
+        number was requested. Returns None when the pool is empty and no
+        default is set.
+        """
+        if from_number:
+            return from_number
+        if self.default_from_number:
+            return self.default_from_number
+        if self.from_numbers:
+            return random.choice(self.from_numbers)
+        return None
 
     @abstractmethod
     async def initiate_call(
@@ -81,7 +124,9 @@ class TelephonyProvider(ABC):
             to_number: The destination phone number
             webhook_url: The URL to receive call events
             workflow_run_id: Optional workflow run ID for tracking
-            from_number: Optional caller ID to use. If None, provider selects randomly.
+            from_number: Optional caller ID to use. If None, the config's
+                default caller ID is used when set, else one is selected
+                randomly from the pool.
             **kwargs: Provider-specific additional parameters
 
         Returns:
@@ -141,14 +186,15 @@ class TelephonyProvider(ABC):
 
     @abstractmethod
     async def get_webhook_response(
-        self, workflow_id: int, user_id: int, workflow_run_id: int
+        self, workflow_id: int, organization_id: int, workflow_run_id: int
     ) -> str:
         """
         Generate the initial webhook response for starting a call session.
 
         Args:
             workflow_id: The workflow ID
-            user_id: The user ID
+            organization_id: The organization owning the workflow; providers
+                embed it in the media websocket URL they hand back
             workflow_run_id: The workflow run ID
 
         Returns:
@@ -192,12 +238,29 @@ class TelephonyProvider(ABC):
         """
         pass
 
+    def supports_answering_machine_detection(self) -> bool:
+        """Return whether this provider can request answering-machine detection."""
+        return False
+
+    def apply_answering_machine_detection_call_params(
+        self,
+        data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Add provider-specific AMD parameters to an outbound call request."""
+        return data
+
+    def parse_answering_machine_detection_result(
+        self, data: Dict[str, Any]
+    ) -> Optional[AnsweringMachineDetectionResult]:
+        """Parse provider-specific callback data into a normalized AMD result."""
+        return None
+
     @abstractmethod
     async def handle_websocket(
         self,
         websocket: "WebSocket",
         workflow_id: int,
-        user_id: int,
+        organization_id: int,
         workflow_run_id: int,
     ) -> None:
         """
@@ -206,10 +269,14 @@ class TelephonyProvider(ABC):
         This method encapsulates all provider-specific WebSocket handshake and
         message routing logic, keeping the main websocket endpoint clean.
 
+        ``organization_id`` is the tenant that every workflow/run lookup must be
+        scoped by. The workflow owner is deliberately not passed in — derive it
+        from the workflow row where it's needed for attribution.
+
         Args:
             websocket: The WebSocket connection
             workflow_id: The workflow ID
-            user_id: The user ID
+            organization_id: The organization owning the workflow and run
             workflow_run_id: The workflow run ID
         """
         pass
@@ -329,17 +396,19 @@ class TelephonyProvider(ABC):
         *,
         organization_id: int,
         workflow_id: int,
-        user_id: int,
         workflow_run_id: int,
         params: Dict[str, str],
     ) -> None:
-        """Handle the agent-stream WebSocket where credentials are passed inline.
+        """Handle the provider-specific agent-stream WebSocket.
 
-        Used by ``/api/v1/agent-stream/{workflow_uuid}`` when the caller carries
-        provider credentials in the query string (no stored
-        ``TelephonyConfigurationModel`` row required). ``organization_id`` is
-        passed so providers can scope any config lookups to the workflow's
-        org. Default raises so providers that haven't opted in fail loudly.
+        Used by ``/api/v1/agent-stream/{provider_name}/{workflow_uuid}`` when
+        the caller carries a provider stream protocol. ``organization_id`` is
+        passed so providers can scope any config lookups to the workflow's org.
+        Default raises so providers that haven't opted in fail loudly.
+
+        The route holds an org concurrency slot while this runs, so
+        implementations must bound their pre-pipeline handshake reads with a
+        timeout — an idle socket must not hold the slot indefinitely.
         """
         raise NotImplementedError(
             f"Agent-stream not supported for provider {self.PROVIDER_NAME}"
@@ -355,6 +424,17 @@ class TelephonyProvider(ABC):
         don't support programmatic webhook configuration (e.g. ARI).
         """
         return ProviderSyncResult(ok=True)
+
+    @abstractmethod
+    async def validate_phone_number(self, address: str) -> ProviderSyncResult:
+        """Check that ``address`` belongs to this provider configuration.
+
+        Carrier-backed providers implement a read-only account-inventory
+        lookup. PBX-managed providers without a carrier ownership resource
+        must explicitly opt out so a newly registered provider cannot silently
+        bypass validation.
+        """
+        raise NotImplementedError
 
     @staticmethod
     @abstractmethod
@@ -413,3 +493,18 @@ class TelephonyProvider(ABC):
             True if provider supports call transfers, False otherwise
         """
         pass
+
+    async def transfer_external_pbx_call(
+        self,
+        *,
+        identity: Dict[str, Any],
+        destination: str,
+        field_updates: Optional[Dict[str, str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Handle an external-PBX-owned customer leg when one is present.
+
+        Providers without an external PBX return ``None`` so the ordinary
+        telephony transfer path continues unchanged.
+        """
+
+        return None
