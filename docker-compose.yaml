@@ -142,6 +142,9 @@ services:
 
   api:
     image: ${REGISTRY:-dograhai}/dograh-api:latest
+    build:
+      context: .
+      dockerfile: api/Dockerfile
     environment:
       # Core application config
       ENVIRONMENT: "${ENVIRONMENT:-local}"
@@ -274,6 +277,9 @@ services:
 
   ui:
     image: ${REGISTRY:-dograhai}/dograh-ui:latest
+    build:
+      context: .
+      dockerfile: ui/Dockerfile
     environment:
       # Bind the Next.js standalone server to all interfaces
       HOSTNAME: "0.0.0.0"
@@ -288,7 +294,6 @@ services:
       # Posthog
       POSTHOG_KEY: "phc_ItizB1dP6yv7ZYobbcqrpxTdbomDA8hJFSEmAMdYvIr"
       POSTHOG_HOST: "https://us.posthog.com"
-      HOSTNAME: "0.0.0.0"
     ports:
       - "3010:3010"
     depends_on:
