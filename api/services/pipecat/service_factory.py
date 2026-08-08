@@ -15,6 +15,7 @@ from api.services.pipecat.gemini_json_schema_adapter import (
     DograhGeminiJSONSchemaAdapter,
 )
 from api.services.pipecat.minimax_tts import MiniMaxOwnedSessionTTSService
+from api.services.pipecat.rumik_tts import RumikTTSService, RumikTTSSettings
 from api.utils.url_security import validate_user_configured_service_url
 from pipecat.services.assemblyai.stt import AssemblyAISTTService, AssemblyAISTTSettings
 from pipecat.services.aws.llm import AWSBedrockLLMService, AWSBedrockLLMSettings
@@ -826,6 +827,23 @@ def create_tts_service(
                 voice=voice,
                 language=pipecat_language,
             ),
+            text_filters=[xml_function_tag_filter],
+            skip_aggregator_types=["recording_router", "recording"],
+            silence_time_s=1.0,
+        )
+    elif user_config.tts.provider == ServiceProviders.RUMIK.value:
+        settings_kwargs = {
+            "model": user_config.tts.model,
+            "voice": getattr(user_config.tts, "voice", "[neutral]"),
+        }
+        for field_name in ["description", "speaker", "f0_up_key", "temperature", "top_p", "top_k", "repetition_penalty", "max_new_tokens"]:
+            val = getattr(user_config.tts, field_name, None)
+            if val is not None:
+                settings_kwargs[field_name] = val
+                
+        return RumikTTSService(
+            api_key=user_config.tts.api_key,
+            settings=RumikTTSSettings(**settings_kwargs),
             text_filters=[xml_function_tag_filter],
             skip_aggregator_types=["recording_router", "recording"],
             silence_time_s=1.0,

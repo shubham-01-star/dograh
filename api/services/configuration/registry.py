@@ -95,6 +95,7 @@ class ServiceProviders(str, Enum):
     AZURE_REALTIME = "azure_realtime"
     SMALLEST = "smallest"
     XAI = "xai"
+    RUMIK = "rumik"
 
 
 class BaseServiceConfiguration(BaseModel):
@@ -1316,6 +1317,56 @@ class XAITTSConfiguration(BaseServiceConfiguration):
         return "xai-tts"
 
 
+RUMIK_TTS_MODELS = ["muga"]
+
+
+@register_tts
+class RumikTTSConfiguration(BaseTTSConfiguration):
+    provider: Literal[ServiceProviders.RUMIK] = ServiceProviders.RUMIK
+    model: str = Field(
+        default="muga",
+        description="Rumik TTS model.",
+        json_schema_extra={"examples": RUMIK_TTS_MODELS},
+    )
+    voice: str = Field(
+        default="[neutral]",
+        description="Rumik voice persona.",
+        json_schema_extra={"allow_custom_input": True},
+    )
+    description: str | None = Field(
+        default=None,
+        description="Text description of the desired voice.",
+    )
+    speaker: str | None = Field(
+        default=None,
+        description="Target speaker name.",
+    )
+    f0_up_key: int = Field(
+        default=0,
+        description="Pitch adjustment.",
+    )
+    temperature: float = Field(
+        default=0.6,
+        description="Temperature for sampling.",
+    )
+    top_p: float = Field(
+        default=0.95,
+        description="Top-p for sampling.",
+    )
+    top_k: int = Field(
+        default=50,
+        description="Top-k for sampling.",
+    )
+    repetition_penalty: float = Field(
+        default=1.2,
+        description="Repetition penalty.",
+    )
+    max_new_tokens: int = Field(
+        default=2048,
+        description="Maximum new tokens.",
+    )
+
+
 TTSConfig = Annotated[
     Union[
         DeepgramTTSConfiguration,
@@ -1333,6 +1384,7 @@ TTSConfig = Annotated[
         AzureSpeechTTSConfiguration,
         SmallestAITTSConfiguration,
         XAITTSConfiguration,
+        RumikTTSConfiguration,
     ],
     Field(discriminator="provider"),
 ]

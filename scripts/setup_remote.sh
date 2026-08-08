@@ -325,11 +325,11 @@ echo -e "${BLUE}[3/$TOTAL] Generating SSL certificates...${NC}"
 echo -e "${GREEN}✓ SSL certificates generated${NC}"
 
 echo -e "${BLUE}[4/$TOTAL] Creating environment file...${NC}"
-OSS_JWT_SECRET=$(openssl rand -hex 32)
-POSTGRES_PASSWORD=$(openssl rand -hex 32)
-REDIS_PASSWORD=$(openssl rand -hex 32)
-MINIO_ROOT_USER="dograh$(openssl rand -hex 6)"
-MINIO_ROOT_PASSWORD=$(openssl rand -hex 32)
+OSS_JWT_SECRET=${OSS_JWT_SECRET:-$(openssl rand -hex 32)}
+POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-$(openssl rand -hex 32)}
+REDIS_PASSWORD=${REDIS_PASSWORD:-$(openssl rand -hex 32)}
+MINIO_ROOT_USER=${MINIO_ROOT_USER:-"dograh$(openssl rand -hex 6)"}
+MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-$(openssl rand -hex 32)}
 
 cat > .env << ENV_EOF
 # Remote deployments run with production signaling and HTTPS defaults

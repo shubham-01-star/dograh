@@ -29,7 +29,7 @@ services:
         max-size: "10m"
         max-file: "3"
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -110,8 +110,8 @@ services:
       ui:
         condition: service_started
     ports:
-      - "80:80"
-      - "443:443"
+      - "8080:80"
+      - "8443:443"
     volumes:
       - nginx-generated:/etc/nginx/conf.d:ro
       - ./certs:/etc/nginx/certs:ro
@@ -276,7 +276,6 @@ services:
       # Posthog
       POSTHOG_KEY: "phc_ItizB1dP6yv7ZYobbcqrpxTdbomDA8hJFSEmAMdYvIr"
       POSTHOG_HOST: "https://us.posthog.com"
-      HOSTNAME: "0.0.0.0"
     ports:
       - "3010:3010"
     depends_on:
