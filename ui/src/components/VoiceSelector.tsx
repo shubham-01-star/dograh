@@ -16,6 +16,7 @@ import { cn } from "@/lib/utils";
 // Providers that have MPS voice endpoints
 type TTSProviderWithVoices = "elevenlabs" | "deepgram" | "sarvam" | "cartesia" | "dograh" | "rime" | "rumik";
 const MPS_VOICE_PROVIDERS: TTSProviderWithVoices[] = ["elevenlabs", "deepgram", "sarvam", "cartesia", "dograh", "rime", "rumik"];
+const ALL_FILTER_VALUE = "__all__";
 
 interface VoiceSelectorProps {
     provider: string;
@@ -85,7 +86,7 @@ export const VoiceSelector: React.FC<VoiceSelectorProps> = ({
             if (model) query.model = model;
             if (language) query.language = language;
             const response = await getVoicesApiV1UserConfigurationsVoicesProviderGet({
-                path: { provider: providerKey },
+                path: { provider: providerKey as any },
                 query: Object.keys(query).length > 0 ? query : undefined,
             });
 

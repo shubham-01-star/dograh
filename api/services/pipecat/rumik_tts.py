@@ -28,6 +28,38 @@ class RumikTTSSettings(TTSSettings):
     max_new_tokens: int | None | _NotGiven = field(default_factory=lambda: NOT_GIVEN)
 
 
+
+def _extract_rumik_error_message(msg_json: dict) -> str:
+    """Extract a user-friendly error message from a Rumik WS or HTTP error response."""
+    detail = (
+        msg_json.get("message")
+        or msg_json.get("detail")
+        or msg_json.get("reason")
+        or msg_json.get("error_message")
+    )
+    code = msg_json.get("code")
+
+    if not detail or detail is True:
+        raw_error = msg_json.get("error")
+        if isinstance(raw_error, str):
+            detail = raw_error
+        else:
+            detail = "Insufficient credits or account quota exceeded."
+
+    detail_str = str(detail)
+
+    if (
+        code == "insufficient_credits"
+        or "credit" in detail_str.lower()
+        or "balance" in detail_str.lower()
+        or "quota" in detail_str.lower()
+        or "payment" in detail_str.lower()
+    ):
+        return f"Rumik TTS Error: Credits exhausted. Please top up your balance. ({detail_str})"
+
+    return f"Rumik WS error: {detail_str}"
+
+
 class RumikTTSService(TTSService):
     """Rumik TTS service that streams synthesized audio over a WebSocket.
 
@@ -134,6 +166,7 @@ class RumikTTSService(TTSService):
                         elif msg_json.get("error"):
                             logger.error(f"Rumik WS error (full response): {json.dumps(msg_json)}")
                             self._persistent_ws_broken = True
+                            self._last_error = _extract_rumik_error_message(msg_json)
                             await self._current_queue.put(None)
                     except Exception as e:
                         logger.error(f"Error parsing Rumik text message: {e}")
@@ -275,10 +308,12 @@ class RumikTTSService(TTSService):
                     self._current_queue = None
 
                 # If persistent WS returned an error (no audio chunks received),
-                # fall through to one-shot mode for this utterance.
+                # surface the exact error message instead of retrying a broken request.
                 if not got_audio and self._persistent_ws_broken:
-                    logger.warning("Persistent WS returned error without audio, retrying via one-shot")
-                    use_persistent = False
+                    err_msg = getattr(self, "_last_error", None) or "Rumik TTS Error: Credits exhausted or WS connection failed."
+                    logger.warning(f"Persistent WS returned error without audio: {err_msg}")
+                    yield ErrorFrame(error=err_msg)
+                    return
             else:
                 logger.warning("Persistent WS unavailable, falling back to one-shot mode")
                 use_persistent = False
@@ -332,7 +367,8 @@ class RumikTTSService(TTSService):
                                 if msg_json.get("type") == "done":
                                     break
                                 elif msg_json.get("error"):
-                                    yield ErrorFrame(error=f"Rumik WS error: {msg_json.get('error')}")
+                                    err_msg = _extract_rumik_error_message(msg_json)
+                                    yield ErrorFrame(error=err_msg)
                                     break
                             except Exception as e:
                                 logger.error(f"Error parsing Rumik text message: {e}")
@@ -340,6 +376,10 @@ class RumikTTSService(TTSService):
                             yield ErrorFrame(error="Rumik WS connection error")
                             break
             except Exception as e:
-                yield ErrorFrame(error=f"Error during Rumik TTS: {str(e)}")
+                err_str = str(e)
+                if any(k in err_str.lower() for k in ["credit", "balance", "quota", "402", "429"]):
+                    yield ErrorFrame(error=f"Rumik TTS Error: Credits exhausted. Please top up your account balance ({err_str})")
+                else:
+                    yield ErrorFrame(error=f"Error during Rumik TTS: {err_str}")
             finally:
                 await self.stop_ttfb_metrics()
