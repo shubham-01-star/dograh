@@ -20,6 +20,7 @@ function nudgeDoneKey(workflowId: number) {
 }
 
 export function HireExpertNudge({ workflowId }: HireExpertNudgeProps) {
+  return null;
   const { openHireExpert, hasOpenedHireRef } = useLeadForms();
   const [visible, setVisible] = useState(false);
   const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
