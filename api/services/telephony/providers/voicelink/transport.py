@@ -1,7 +1,7 @@
-"""Vobiz transport factory.
+"""VoiceLink transport factory.
 
-Vobiz uses Plivo-compatible WebSocket protocol:
-- MULAW audio at 8kHz (same as Twilio)
+VoiceLink uses real-time WebSocket protocol:
+- 8kHz audio sample rate (PCMA / PCMU)
 - Base64-encoded audio in JSON messages
 """
 
@@ -17,8 +17,7 @@ from api.services.pipecat.audio_mixer import build_audio_out_mixer
 from api.services.pipecat.transport_params import realtime_param_overrides
 from api.services.telephony.factory import load_credentials_for_transport
 
-from .serializers import VobizFrameSerializer
-from .strategies import VobizConferenceStrategy, VobizHangupStrategy
+from .serializers import VoiceLinkFrameSerializer
 
 
 async def create_transport(
@@ -33,35 +32,29 @@ async def create_transport(
     stream_id: str,
     call_id: str,
 ):
-    """Create a transport for Vobiz connections."""
+    """Create a transport for VoiceLink connections."""
     logger.info(
-        f"[run {workflow_run_id}] Creating Vobiz transport - "
+        f"[run {workflow_run_id}] Creating VoiceLink transport - "
         f"stream_id={stream_id}, call_id={call_id}"
     )
 
     config = await load_credentials_for_transport(
-        organization_id, telephony_configuration_id, expected_provider="vobiz"
+        organization_id, telephony_configuration_id, expected_provider="voicelink"
     )
 
-    auth_id = config.get("auth_id")
+    client_id = config.get("client_id")
     auth_token = config.get("auth_token")
 
-    if not auth_id or not auth_token:
+    if not client_id or not auth_token:
         raise ValueError(
-            f"Incomplete Vobiz configuration for organization {organization_id}"
+            f"Incomplete VoiceLink configuration for organization {organization_id}"
         )
 
-    serializer = VobizFrameSerializer(
-        stream_id=stream_id,
-        call_id=call_id,
-        auth_id=auth_id,
+    serializer = VoiceLinkFrameSerializer(
+        stream_sid=stream_id,
+        call_sid=call_id,
+        account_sid=client_id,
         auth_token=auth_token,
-        transfer_strategy=VobizConferenceStrategy(),
-        hangup_strategy=VobizHangupStrategy(),
-        params=VobizFrameSerializer.InputParams(
-            vobiz_sample_rate=8000,
-            sample_rate=audio_config.pipeline_sample_rate,
-        ),
     )
 
     mixer = await build_audio_out_mixer(
@@ -81,5 +74,5 @@ async def create_transport(
         ),
     )
 
-    logger.info(f"[run {workflow_run_id}] Vobiz transport created successfully")
+    logger.info(f"[run {workflow_run_id}] VoiceLink transport created successfully")
     return transport

@@ -113,6 +113,7 @@ Pick the closest shape and copy from it.
 | `cloudonix/` | SIP-trunk-style with custom transfer/hangup strategies.                                                                        |
 | `telnyx/`    | Call-control style — REST calls to answer/stream rather than markup response.                                                  |
 | `vobiz/`     | Body-signed webhooks (signature covers raw bytes).                                                                             |
+| `voicelink/` | India-only TRAI-compliant cloud telephony, Twilio-compatible WebSocket framing, 8 kHz PCMA/PCMU, token-based auth.             |
 | `ari/`       | Smallest viable: no `routes.py`, no `verify_inbound_signature`, WebSocket-only, no account-id.                                 |
 
 ## What NOT to do

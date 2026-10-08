@@ -146,8 +146,7 @@ class VobizProvider(TelephonyProvider):
                 if not call_id:
                     raise HTTPException(
                         status_code=response.status,
-                        detail=f"Vobiz API response missing call identifier. Response: {response_data}"
-                        f"Vobiz API response missing call identifier. Response: {response_data}",
+                        detail=f"Vobiz API response missing call identifier. Response: {response_data}",
                     )
 
                 logger.info(f"Vobiz call initiated successfully. Call ID: {call_id}")
@@ -790,19 +789,104 @@ class VobizProvider(TelephonyProvider):
         timeout: int = 30,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """
-        Vobiz provider does not support call transfers.
+        """Dial the transfer destination and point its answer URL at the conference.
 
-        Raises:
-            NotImplementedError: Vobiz call transfers are yet to be implemented
+        The destination answer callback seeds the conference. The original
+        caller is redirected later by ``VobizConferenceStrategy`` when the
+        pipeline ends with ``TRANSFER_CALL``.
         """
-        raise NotImplementedError("Vobiz provider does not support call transfers")
+        if not self.validate_config():
+            raise ValueError("Vobiz provider not properly configured")
+
+        from_number = self.select_from_number()
+        logger.info(f"Selected phone number {from_number} for Vobiz transfer call")
+
+        backend_endpoint, _ = await get_backend_endpoints()
+
+        answer_url = f"{backend_endpoint}/api/v1/telephony/vobiz/transfer-xml/{conference_name}/{transfer_id}"
+        hangup_url = (
+            f"{backend_endpoint}/api/v1/telephony/vobiz/transfer-result/{transfer_id}"
+        )
+
+        endpoint = f"{self.base_url}/v1/Account/{self.auth_id}/Call/"
+        data = {
+            "to": destination.lstrip("+"),
+            "from": from_number.lstrip("+"),
+            "answer_url": answer_url,
+            "answer_method": "POST",
+            "hangup_url": hangup_url,
+            "hangup_method": "POST",
+            "ring_timeout": timeout,
+        }
+        data.update(kwargs)
+
+        headers = {
+            "X-Auth-ID": self.auth_id,
+            "X-Auth-Token": self.auth_token,
+            "Content-Type": "application/json",
+        }
+
+        try:
+            logger.debug(
+                f"Dialing Vobiz transfer destination for transfer_id={transfer_id} "
+                f"to destination={destination}"
+            )
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(endpoint, json=data, headers=headers) as response:
+                    response_status = response.status
+                    response_text = await response.text()
+
+                    logger.info(
+                        f"Vobiz transfer destination API response: {response_status}"
+                    )
+
+                    if response_status not in (200, 201, 202):
+                        error_msg = (
+                            f"Vobiz API call failed with status "
+                            f"{response_status}: {response_text}"
+                        )
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
+
+                    try:
+                        response_data = json.loads(response_text)
+                    except Exception as e:
+                        logger.error(
+                            f"Failed to parse Vobiz transfer response JSON: {e}"
+                        )
+                        raise Exception(f"Failed to parse transfer response: {e}")
+
+                    call_id = (
+                        response_data.get("call_uuid")
+                        or response_data.get("CallUUID")
+                        or response_data.get("request_uuid")
+                        or response_data.get("RequestUUID")
+                    )
+                    if not call_id:
+                        raise Exception(
+                            f"Vobiz transfer response missing call identifier: {response_data}"
+                        )
+                    logger.info(f"Vobiz transfer destination initiated: {call_id}")
+
+                    return {
+                        "call_sid": call_id,
+                        "status": "queued",
+                        "provider": self.PROVIDER_NAME,
+                        "from_number": from_number,
+                        "to_number": destination,
+                        "raw_response": response_data,
+                    }
+
+        except Exception as e:
+            logger.error(f"Error initiating Vobiz transfer call: {e}")
+            raise
 
     def supports_transfers(self) -> bool:
-        """
-        Vobiz does not support call transfers.
+        """Check if Vobiz provider supports call transfers.
 
         Returns:
-            False - Vobiz provider does not support call transfers
+            True - Vobiz provider supports call transfers
         """
-        return False
+        return True
+
